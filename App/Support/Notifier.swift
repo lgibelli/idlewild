@@ -1,5 +1,8 @@
 import Foundation
 import UserNotifications
+import os
+
+private let nlog = Logger(subsystem: "it.salamacchine.idlewild", category: "notifier")
 
 /// Native notifications with actions. Requires a signed bundle with a bundle
 /// identifier - one of the reasons this ships as an app rather than a CLI tool.
@@ -23,7 +26,13 @@ enum Notifier {
             ],
             intentIdentifiers: [], options: [])
         c.setNotificationCategories([category])
-        c.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        c.requestAuthorization(options: [.alert, .sound]) { granted, error in
+            if let error {
+                nlog.error("authorization failed: \(error.localizedDescription, privacy: .public)")
+            } else {
+                nlog.notice("notification authorization granted=\(granted)")
+            }
+        }
     }
 
     static func post(incident: Incident, enabled: Bool) {
@@ -36,6 +45,12 @@ enum Notifier {
         n.userInfo = ["pid": Int(incident.pid), "name": incident.name]
         n.sound = .default
         UNUserNotificationCenter.current().add(
-            UNNotificationRequest(identifier: "runaway-\(incident.pid)", content: n, trigger: nil))
+            UNNotificationRequest(identifier: "runaway-\(incident.pid)", content: n, trigger: nil)) { error in
+                if let error {
+                    nlog.error("post failed: \(error.localizedDescription, privacy: .public)")
+                } else {
+                    nlog.notice("posted notification for pid \(incident.pid)")
+                }
+            }
     }
 }

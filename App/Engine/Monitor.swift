@@ -1,8 +1,13 @@
 import Foundation
 import Combine
 import UserNotifications
+import os
 
 /// Owns the scan timer and turns detections into user-facing incidents.
+/// Diagnostics go to the unified log, so an installed copy can be inspected
+/// with:  log stream --predicate 'subsystem == "it.salamacchine.idlewild"'
+let log = Logger(subsystem: "it.salamacchine.idlewild", category: "monitor")
+
 @MainActor
 final class Monitor: ObservableObject {
 
@@ -84,6 +89,7 @@ final class Monitor: ObservableObject {
             for i in enriched {
                 self.incidents.removeAll { $0.pid == i.pid }
                 self.incidents.append(i)
+                log.notice("incident: \(i.name, privacy: .public) pid \(i.pid) \(i.cpuPercent, format: .fixed(precision: 0))% cause=\(i.cause, privacy: .public)")
                 Notifier.post(incident: i, enabled: self.settings.notificationsEnabled)
             }
             let want = suspect ? self.settings.busyInterval : self.settings.calmInterval
