@@ -23,6 +23,20 @@ struct MenuView: View {
                 }
             }
 
+            if let problem = Notifier.authorizationProblem {
+                Divider().padding(.vertical, 6)
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Notifications are unavailable", systemImage: "bell.slash")
+                        .font(.caption.bold()).foregroundStyle(.orange)
+                    Text(problem).font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("Idlewild still watches and still shows the flame above.")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                    Button("Open Notification Settings") { Notifier.openSettings() }
+                        .buttonStyle(.link).font(.caption)
+                }
+            }
+
             Divider().padding(.vertical, 6)
             topList
             Divider().padding(.vertical, 6)

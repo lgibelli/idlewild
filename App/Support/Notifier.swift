@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import UserNotifications
 import os
 
@@ -7,6 +8,12 @@ private let nlog = Logger(subsystem: "it.salamacchine.idlewild", category: "noti
 /// Native notifications with actions. Requires a signed bundle with a bundle
 /// identifier - one of the reasons this ships as an app rather than a CLI tool.
 enum Notifier {
+
+    /// Whether the system will actually show our notifications. When it will
+    /// not, the menu says so rather than the app failing silently - the menu bar
+    /// flame and the menu itself keep working regardless.
+    @MainActor static var isAuthorized = false
+    @MainActor static var authorizationProblem: String?
 
     static let categoryID = "it.salamacchine.idlewild.runaway"
     enum Action: String { case kill = "KILL", suspend = "SUSPEND", ignore = "IGNORE" }
@@ -27,12 +34,24 @@ enum Notifier {
             intentIdentifiers: [], options: [])
         c.setNotificationCategories([category])
         c.requestAuthorization(options: [.alert, .sound]) { granted, error in
-            if let error {
-                nlog.error("authorization failed: \(error.localizedDescription, privacy: .public)")
-            } else {
-                nlog.notice("notification authorization granted=\(granted)")
+            Task { @MainActor in
+                if let error {
+                    nlog.error("authorization failed: \(error.localizedDescription, privacy: .public)")
+                    isAuthorized = false
+                    authorizationProblem = error.localizedDescription
+                } else {
+                    nlog.notice("notification authorization granted=\(granted)")
+                    isAuthorized = granted
+                    authorizationProblem = granted ? nil : "Notifications are turned off for Idlewild."
+                }
             }
         }
+    }
+
+    /// Opens the Notifications pane so the user can enable us by hand.
+    @MainActor static func openSettings() {
+        let url = "x-apple.systempreferences:com.apple.preference.notifications"
+        if let u = URL(string: url) { NSWorkspace.shared.open(u) }
     }
 
     static func post(incident: Incident, enabled: Bool) {
