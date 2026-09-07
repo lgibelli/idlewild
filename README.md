@@ -150,13 +150,18 @@ open build/Idlewild.app
 ./Scripts/e2e-test.sh              # spawns a real CPU burner and asserts on it
 ```
 
-Release:
+Release — copy `release.env.example` to `release.env`, fill in your Team ID and
+notarytool profile, then:
 
 ```sh
-CODESIGN_IDENTITY="Developer ID Application: You (TEAMID)" \
-NOTARY_PROFILE=idlewild-notary \
-  ./Scripts/notarize.sh && ./Scripts/make-dmg.sh
+./Scripts/notarize.sh     # build, sign, submit, staple, verify with spctl
+./Scripts/make-dmg.sh     # package, sign and notarize the DMG itself
 ```
+
+`build.sh` signs with the Developer ID Application identity for your `TEAM_ID`
+when one is in the keychain, and falls back to adhoc otherwise — printing the
+designated requirement either way, since that is what macOS uses as the app's
+identity for permissions.
 
 There is no Xcode project — `swiftc` assembles the bundle directly, so the whole
 build is reproducible from a shell.

@@ -34,8 +34,15 @@ say "1/5  Build and sign"
 ./Scripts/build.sh
 
 # Notarization is rejected outright without the hardened runtime flag.
-codesign -dv "$APP" 2>&1 | grep -q "flags=.*runtime" \
-    || die "hardened runtime missing — check the codesign --options runtime flag"
+#
+# Capture first rather than piping into `grep -q`: under `set -o pipefail`,
+# grep -q exits on first match, codesign takes SIGPIPE, and the pipeline reports
+# failure exactly when the check succeeds.
+CS_FLAGS=$(codesign -d --verbose=2 "$APP" 2>&1 | grep -o 'flags=0x[0-9a-f]*([^)]*)' || true)
+case "$CS_FLAGS" in
+    *runtime*) say "Hardened runtime confirmed: $CS_FLAGS" ;;
+    *) die "hardened runtime missing (got '${CS_FLAGS:-none}') — check codesign --options runtime" ;;
+esac
 
 say "2/5  Zip for submission"
 rm -f "$ZIP"

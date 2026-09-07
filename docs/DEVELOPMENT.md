@@ -1,6 +1,40 @@
 # Development notes
 
+## "Notifications are not allowed for this application"
+
+If `requestAuthorization` fails with this error, check whether a **Focus mode is
+active** before looking anywhere else. It is the first thing to rule out, and it
+is easy to misattribute to signing.
+
+This was diagnosed by elimination. A twenty-line app that does nothing but call
+`requestAuthorization` failed identically, which ruled out any Idlewild bug.
+Then, one at a time:
+
+| hypothesis | test | result |
+|---|---|---|
+| adhoc signing | signed with Developer ID | still failed |
+| not notarized | notarized + stapled, Gatekeeper accepted | still failed |
+| MDM restriction | `profiles status -type enrollment` | not enrolled |
+| `LSUIElement` agent app | built a regular Dock app | still failed |
+| cached denial | inspected `com.apple.ncprefs` | no record existed |
+
+What remained was a scheduled **Sleep Focus** asserted in
+`~/Library/DoNotDisturb/DB/Assertions.json`. Other apps had delivered
+notifications normally earlier the same day, before it began.
+
+To check the current state:
+
+```sh
+plutil -p ~/Library/DoNotDisturb/DB/Assertions.json | grep -A3 assertionDetails
+```
+
+`assertionDetailsUserVisibleEndDate` is a Mac absolute time — add 978307200 for
+a Unix timestamp.
+
 ## Notifications do not persist across adhoc-signed builds
+
+This is a separate, genuine caveat — it is *not* the cause of the error above,
+though it is easy to conflate the two.
 
 `./Scripts/build.sh` signs with the adhoc identity (`-`) by default, which makes
 the app's designated requirement a hash of the binary itself:
