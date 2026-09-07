@@ -51,9 +51,25 @@ final class AppSettings: @unchecked Sendable {
         get { d.stringArray(forKey: K.allow) ?? Self.defaultAllowList }
         set { d.set(newValue, forKey: K.allow) } }
 
+    /// Entries are matched against whole path components, never as raw
+    /// substrings of the full path. A substring match makes short entries
+    /// catastrophic: "ld" (the linker) matches "/var/folders/..." because
+    /// "folders" contains "ld", which silently allowlists most temp binaries.
     func isAllowed(path: String) -> Bool {
         guard !path.isEmpty else { return false }
-        return allowList.contains { !$0.isEmpty && path.localizedCaseInsensitiveContains($0) }
+        let components = path.components(separatedBy: "/").filter { !$0.isEmpty }
+        return allowList.contains { entry in
+            let e = entry.trimmingCharacters(in: .whitespaces)
+            guard e.count >= 2 else { return false }
+            // An entry containing a slash is an explicit path fragment.
+            if e.contains("/") { return path.localizedCaseInsensitiveContains(e) }
+            // Otherwise a component must equal it, or begin with it, so that
+            // "Adobe Premiere" still matches "Adobe Premiere Pro 2024.app".
+            return components.contains {
+                $0.compare(e, options: .caseInsensitive) == .orderedSame
+                    || $0.lowercased().hasPrefix(e.lowercased())
+            }
+        }
     }
 
     func allow(path: String) {

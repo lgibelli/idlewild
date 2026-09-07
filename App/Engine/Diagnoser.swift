@@ -26,7 +26,7 @@ enum Diagnoser {
         ("allocation churn", ["malloc_zone", "free_tiny"], false),
     ]
 
-    static func diagnose(pid: pid_t, timeout: TimeInterval = 12) -> Verdict {
+    static func diagnose(pid: pid_t, processName: String = "", timeout: TimeInterval = 12) -> Verdict {
         guard let text = runSample(pid: pid, seconds: 2, timeout: timeout) else {
             return Verdict(cause: "could not inspect this process", confident: false)
         }
@@ -46,6 +46,12 @@ enum Diagnoser {
         if hay.contains("__psynch_cvwait") || hay.contains("mach_msg2_trap") {
             return Verdict(cause: "threads look idle - the CPU time may be elsewhere",
                            confident: false)
+        }
+        // No framework matched, but the hot frames belong to the process itself:
+        // a plain compute loop in its own code. Common, and worth naming rather
+        // than shrugging at.
+        if !processName.isEmpty, hay.contains("(in \(processName))") {
+            return Verdict(cause: "a tight loop in the program's own code", confident: true)
         }
         return Verdict(cause: "cause unclear", confident: false)
     }

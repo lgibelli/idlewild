@@ -42,9 +42,22 @@ process whose threads are merely parked.
 **A monitor must never become the thing it hunts.**
 
 Budget: under 1 second of CPU time per hour, measured rather than assumed, and
-shown to you in the app's own About panel. For scale, a typical menu bar CPU
-meter costs around 3.6% of a core continuously — roughly 130 seconds of CPU per
-hour.
+shown to you in the app's own About panel.
+
+| | CPU per hour | % of one core |
+|---|---|---|
+| **Idlewild** (120 s cadence, steady state) | **161 ms** | 0.0045% |
+| Same engine, headless CLI | 26 ms | 0.0007% |
+| A typical menu bar CPU meter, for scale | ~130,000 ms | 3.6% |
+
+Measured on an M1 MacBook Air over a 5-minute window with app startup excluded —
+lifetime averages are dominated by AppKit initialisation and flatter the result.
+
+Getting there took one real fix. `topProcesses` and `ownCPUms` were `@Published`
+and changed on every scan, so SwiftUI invalidated the menu bar label each time
+*even with the menu closed* — the exact always-redrawing menu bar item this app
+was written to catch. Publishing only what the icon depends on took it from
+680 ms/hour to 161 ms/hour.
 
 Five decisions keep it there:
 
@@ -111,6 +124,11 @@ keeps it quiet:
 - **Pause It** as an alternative to Force Quit — `SIGSTOP` stops the burn without
   losing the process's state, so a stuck tab can be resumed rather than lost.
 
+Allowlist entries match whole path components, never raw substrings. This is not
+fussiness: the first version matched substrings and shipped `"ld"` for the
+linker, which silently allowlisted everything under `/var/folders/` — because
+"folders" contains "ld". The end-to-end test caught it.
+
 ## Not on the Mac App Store
 
 It cannot be. Under the App Sandbox, `proc_listpids`, `proc_pid_rusage` and
@@ -129,6 +147,7 @@ Runtime.
 ```sh
 ./Scripts/build.sh                 # builds and adhoc-signs build/Idlewild.app
 open build/Idlewild.app
+./Scripts/e2e-test.sh              # spawns a real CPU burner and asserts on it
 ```
 
 Release:
@@ -153,4 +172,6 @@ App/UI/                           menu bar and settings
 App/Support/                      preferences, signals, notifications
 cli/main.swift                    headless CLI (scan / watch / selftest / cost)
 Scripts/sandbox-probe.sh          reproduces the App Store findings
+Scripts/e2e-test.sh               end-to-end test against a controlled burner
+Scripts/make-icon.swift           generates the app icon
 ```

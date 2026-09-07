@@ -29,7 +29,7 @@ struct Config {
 
     // Processes that are *supposed* to peg a core. Matched against exec path.
     var allowList = [
-        "/usr/bin/ffmpeg", "ffmpeg", "clang", "swift-frontend", "ld",
+        "ffmpeg", "clang", "swift-frontend",
         "cc1plus", "rustc", "cargo", "node_modules/.bin",
         "Xcode.app", "Final Cut Pro.app", "Compressor.app",
         "com.docker", "qemu", "HandBrake",
@@ -134,6 +134,21 @@ func hostCPUTicks() -> (busy: UInt64, total: UInt64)? {
     return (busy: u &+ s &+ n, total: u &+ s &+ n &+ i)
 }
 
+/// Matches whole path components, never raw substrings: "ld" as a substring
+/// matches "/var/folders/..." because "folders" contains it.
+func isAllowed(path: String, allowList: [String]) -> Bool {
+    guard !path.isEmpty else { return false }
+    let components = path.components(separatedBy: "/").filter { !$0.isEmpty }
+    return allowList.contains { entry in
+        guard entry.count >= 2 else { return false }
+        if entry.contains("/") { return path.localizedCaseInsensitiveContains(entry) }
+        return components.contains {
+            $0.compare(entry, options: .caseInsensitive) == .orderedSame
+                || $0.lowercased().hasPrefix(entry.lowercased())
+        }
+    }
+}
+
 // MARK: - Detector state
 
 struct Track {
@@ -215,7 +230,7 @@ final class Detector {
                     let path = pathCache[pid] ?? {
                         let p = execPath(pid); pathCache[pid] = p; return p
                     }()
-                    if !cfg.allowList.contains(where: { path.contains($0) }) {
+                    if !isAllowed(path: path, allowList: cfg.allowList) {
                         t.alerted = true
                         alerts.append(Alert(
                             pid: pid, name: displayName(pid, path), path: path,
@@ -245,7 +260,7 @@ final class Detector {
 
 // MARK: - Diagnosis. Runs once per incident, never on a timer.
 
-func diagnose(_ pid: pid_t) -> String {
+func diagnose(_ pid: pid_t, _ processName: String = "") -> String {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
     p.arguments = ["\(pid)", "2", "-mayDie"]
@@ -285,6 +300,9 @@ func diagnose(_ pid: pid_t) -> String {
     // Guard against a false positive: threads parked, not burning.
     if hay.contains("__psynch_cvwait") && !hay.contains("JavaScriptCore") {
         return "mostly idle threads - the CPU time may be elsewhere; worth a manual look"
+    }
+    if !processName.isEmpty, hay.contains("(in \(processName))") {
+        return "a tight loop in the program's own code"
     }
     return "unrecognised pattern - run: sample \(pid) 5"
 }
@@ -417,12 +435,12 @@ func cmdWatch(cfg: Config) {
 
     timer.setEventHandler {
         for a in d.scan() {
-            let why = diagnose(a.pid)
+            let why = diagnose(a.pid, a.name)
             print("""
 
             [\(iso.string(from: Date()))]  RUNAWAY PROCESS
               \(a.name)  (pid \(a.pid))
-              \(String(format: "%.0f%%", a.cpuPercent)) of one core, held for \(Int(a.heldFor / 60)) min
+              \(String(format: "%.0f%%", a.cpuPercent)) of one core, held for \(a.heldFor < 90 ? "\(Int(a.heldFor))s" : "\(Int(a.heldFor / 60)) min")
               memory \(String(format: "%.0f MB", a.footprintMB)) \
             (\(String(format: "%+.0f MB", a.footprintGrowthMB)) since it started spinning)
               likely cause: \(why)

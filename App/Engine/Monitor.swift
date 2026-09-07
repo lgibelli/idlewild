@@ -71,7 +71,8 @@ final class Monitor: ObservableObject {
         // never on main, and only for confirmed incidents.
         let enriched = found.map { inc -> Incident in
             var i = inc
-            i.cause = Diagnoser.diagnose(pid: inc.pid).cause
+            i.cause = Diagnoser.diagnose(pid: inc.pid,
+                                        processName: (inc.path as NSString).lastPathComponent).cause
             return i
         }
 
