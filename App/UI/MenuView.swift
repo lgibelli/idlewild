@@ -29,9 +29,6 @@ struct MenuView: View {
         }
 
         Divider()
-        busiest
-
-        Divider()
         Button(monitor.isPaused ? "Resume Monitoring" : "Pause Monitoring") {
             monitor.togglePause()
         }
@@ -53,20 +50,6 @@ struct MenuView: View {
             Text(monitor.incidents.count == 1
                  ? "1 process running away"
                  : "\(monitor.incidents.count) processes running away")
-        }
-    }
-
-    @ViewBuilder
-    private var busiest: some View {
-        let top = monitor.topProcesses
-        Section("Busiest Now") {
-            if top.isEmpty {
-                Text("Idle")
-            } else {
-                ForEach(top, id: \.pid) { p in
-                    Text("\(p.name) — \(Int(p.pct))%")
-                }
-            }
         }
     }
 

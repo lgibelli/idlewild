@@ -7,18 +7,38 @@ Activity Monitor is a microscope, not a smoke alarm — you have to already
 suspect something before you go look. Idlewild is the smoke alarm.
 
 ```
-──  Menu bar  ────────────────
- 🔥  Runaway process detected
+ 🔥  ← the menu bar icon, once something is wrong
 
- Safari web page
- 104% CPU for 9.8 hours,
- memory +11 MB/min
- a web page stuck throwing
- JavaScript errors in a loop
-
- [Force Quit] [Pause It] [Ignore]
-──────────────────────────────
+ ┌─────────────────────────────────────────────┐
+ │ 1 process running away                      │
+ ├─────────────────────────────────────────────┤
+ │ Safari web page — 104% for 9.8 hours     ▸  │──┐
+ ├─────────────────────────────────────────────┤  │
+ │ Pause Monitoring                            │  │
+ │ Settings…                                ⌘, │  │
+ ├─────────────────────────────────────────────┤  │
+ │ Quit Idlewild                            ⌘Q │  │
+ └─────────────────────────────────────────────┘  │
+                                                  ▼
+                    ┌──────────────────────────────────────────┐
+                    │ Force Quit                               │
+                    │ Pause It                                 │
+                    ├──────────────────────────────────────────┤
+                    │ Ignore This Time                         │
+                    │ Always Allow com.apple.WebKit.WebContent │
+                    ├──────────────────────────────────────────┤
+                    │ A web page stuck throwing JavaScript     │
+                    │ errors in a loop                         │
+                    │ On performance cores — this is what      │
+                    │ heats the machine                        │
+                    │ Memory growing 11 MB/min                 │
+                    │ pid 84183                                │
+                    └──────────────────────────────────────────┘
 ```
+
+The icon is an ECG trace when all is well and a flame when it is not. It is a
+real `NSMenu`, not a custom panel, and it shows no live statistics — see the
+note on cost below.
 
 It was written after a Safari tab spent nine and a half hours pegging a core on
 a fanless MacBook Air, entirely unnoticed.
@@ -32,6 +52,7 @@ sample and classifies it:
 > a web page stuck throwing JavaScript errors in a loop
 > garbage-collection thrash, usually a memory leak
 > regular-expression backtracking
+> a tight loop in the program's own code
 > threads look idle — the CPU time may be elsewhere
 
 That last one matters as much as the others: it stops the app from accusing a
@@ -46,67 +67,25 @@ shown to you in the app's own About panel.
 
 | | CPU per hour | % of one core |
 |---|---|---|
-| **Idlewild** (120 s cadence, steady state) | **161 ms** | 0.0045% |
+| **Idlewild** (120 s cadence, steady state) | **217 ms** | 0.006% |
 | Same engine, headless CLI | 26 ms | 0.0007% |
 | A typical menu bar CPU meter, for scale | ~130,000 ms | 3.6% |
 
-Measured on an M1 MacBook Air over a 5-minute window with app startup excluded —
-lifetime averages are dominated by AppKit initialisation and flatter the result.
+Measured on an M1 MacBook Air over a ten-minute window with app startup
+excluded — lifetime averages are dominated by AppKit initialisation and flatter
+the result badly.
 
-Getting there took one real fix. `topProcesses` and `ownCPUms` were `@Published`
-and changed on every scan, so SwiftUI invalidated the menu bar label each time
-*even with the menu closed* — the exact always-redrawing menu bar item this app
-was written to catch. Publishing only what the icon depends on took it from
-680 ms/hour to 161 ms/hour.
+### Measure on a quiet machine
 
-Five decisions keep it there:
+Measurements taken while building, installing or relaunching apps are worthless.
+Every install broadcasts LaunchServices and workspace notifications that each
+running app's run loop must service, so the thing being measured absorbs the
+cost of the measuring. Two consecutive runs here reported 1449 and 3343 ms/hour
+— and the *second*, with an optimisation reverted, was worse than the first.
 
-1. **The hot loop makes one syscall per process and nothing else.**
-   `proc_pid_rusage()` only — no forking `ps`, no string formatting, no
-   allocation (the pid buffer is reused). Executable paths cost a 4 KB string
-   copy each, so they are resolved only for suspects, then cached.
-2. **Timers carry 25% leeway,** letting the kernel coalesce our wakeup with
-   others instead of pulling the SoC out of deep idle on our account. On fanless
-   Apple Silicon, wakeups drive heat as much as cycles do.
-3. **Adaptive cadence.** 120 s between scans when calm; 10 s only while a
-   suspect is building. We hunt anomalies lasting minutes — polling at 1 Hz
-   would buy nothing and cost 100×.
-4. **The expensive path runs once per incident, never on a timer.** `sample(1)`
-   suspends the target and walks its stacks.
-5. **The menu bar icon changes only when state changes.** It never repaints on a
-   schedule. A menu bar item that redraws every second is precisely the failure
-   this app exists to catch.
-
-## Apple Silicon only
-
-That is a deliberate choice, and it buys real signal.
-
-`rusage_info_v4` carries a per-QoS breakdown of where a process spent its CPU
-time. On Apple Silicon that maps onto physical cores: `user_interactive` work
-runs on P-cores at high clock, `background` work parks on E-cores and barely
-warms the die. **Two processes at 100% CPU can differ enormously in how much
-heat they produce,** and Idlewild can tell them apart — it flags the P-core kind
-with "this is what heats the machine".
-
-It also reads `ri_instructions` and `ri_cycles`. High IPC alongside pinned CPU
-means a tight in-cache loop — a spin. Low IPC means memory stalls, which is more
-often genuine work.
-
-### The trap that comes with it
-
-`proc_pid_rusage()` reports CPU time in **mach absolute time units, not
-nanoseconds**. On Intel the timebase is 1/1 so the two coincide and the bug is
-invisible. On Apple Silicon it is 125/3, making raw values read **41.67× too
-low** — uncorrected, this watchdog would silently never fire, because nothing
-would ever appear to cross an 80% threshold.
-
-Always convert through `mach_timebase_info()`. Never hardcode the ratio; it is a
-property of the machine, not of the architecture.
-
-It was caught by cross-checking against `ps -r` and finding a suspiciously round
-41.7× discrepancy. The same bug was simultaneously under-reporting Idlewild's
-*own* cost by the same factor, so the first "well under budget" result was wrong
-in both directions at once. Validate against an independent source.
+That contradiction is the signal. When reverting a change appears to make things
+worse, the experiment is broken before the code is. On a quiet machine the same
+build measures 217 ms/hour.
 
 ## False positives are the whole product
 

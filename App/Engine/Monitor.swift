@@ -18,11 +18,6 @@ final class Monitor: ObservableObject {
     @Published private(set) var incidents: [Incident] = []
     @Published private(set) var isPaused = false
 
-    // Published so the menu shows current values. Under .menuBarExtraStyle(.menu)
-    // the menu content is only materialised when opened, so publishing this
-    // invalidates just the tiny label view rather than a whole view hierarchy -
-    // measured at no meaningful cost. It was expensive under .window style.
-    @Published private(set) var topProcesses: [(pid: pid_t, name: String, pct: Double)] = []
     private(set) var lastScan: Date?
     private(set) var ownCPUms: Double = 0
 
@@ -72,7 +67,6 @@ final class Monitor: ObservableObject {
 
     private nonisolated func tick() {
         let found = detector.scan()
-        let top = detector.topProcesses
         let suspect = detector.hasActiveSuspect
 
         // Diagnosis is expensive, so it happens here on the utility queue,
@@ -86,7 +80,6 @@ final class Monitor: ObservableObject {
 
         Task { @MainActor [weak self] in
             guard let self else { return }
-            self.topProcesses = top
             self.lastScan = Date()
             self.refreshOwnCost()
             for i in enriched {

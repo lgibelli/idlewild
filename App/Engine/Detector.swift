@@ -71,10 +71,6 @@ final class Detector: @unchecked Sendable {
 
     var hasActiveSuspect: Bool { tracks.values.contains { $0.overSince != nil } }
 
-    /// Top consumers right now, for the menu. Uses values already gathered by the
-    /// last scan, so opening the menu costs nothing.
-    private(set) var topProcesses: [(pid: pid_t, name: String, pct: Double)] = []
-
     func scan(syntheticDt: Double? = nil) -> [Incident] {
         let now = Date()
         let dt = syntheticDt ?? now.timeIntervalSince(lastScan)
@@ -83,7 +79,6 @@ final class Detector: @unchecked Sendable {
 
         var incidents: [Incident] = []
         var seen = Set<pid_t>()
-        var top: [(pid_t, Double, UInt64)] = []
 
         for pid in lister.list() {
             guard pid > 0, let s = sampleProc(pid) else { continue }
@@ -100,7 +95,6 @@ final class Detector: @unchecked Sendable {
             t.lastCPU = s.cpuNanos
             t.lastFootprint = s.footprint
             t.lastPercent = pct
-            if pct > 1 { top.append((pid, pct, s.footprint)) }
 
             if pct >= settings.cpuThreshold && pid != selfPID {
                 if t.overSince == nil { t.overSince = now; t.footprintAtCross = s.footprint }
@@ -130,8 +124,6 @@ final class Detector: @unchecked Sendable {
             pathCache = pathCache.filter { seen.contains($0.key) }
         }
 
-        top.sort { $0.1 > $1.1 }
-        topProcesses = top.prefix(5).map { (pid: $0.0, name: friendlyName($0.0, cachedPath($0.0)), pct: $0.1) }
         return incidents
     }
 
