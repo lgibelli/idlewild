@@ -1,45 +1,63 @@
 #!/bin/bash
-# Sign, notarize and staple Idlewild for distribution outside the App Store.
 #
-# Prerequisites (one time):
-#   1. Apple Developer Program membership.
-#   2. A "Developer ID Application" certificate in your login keychain.
-#        security find-identity -v -p codesigning
-#   3. An app-specific password stored as a notarytool profile:
-#        xcrun notarytool store-credentials idlewild-notary \
-#            --apple-id you@example.com --team-id TEAMID --password APP-SPECIFIC-PW
+# notarize.sh — build, sign, notarize, staple and verify Idlewild for
+# Developer ID distribution (outside the Mac App Store).
+#
+# Idlewild cannot ship on the Mac App Store: under the App Sandbox,
+# proc_listpids, proc_pid_rusage and kill() all return EPERM, so it can neither
+# find, measure, nor stop a runaway process. See docs/APP-STORE.md, and
+# reproduce with Scripts/sandbox-probe.sh.
+#
+# Prereqs (one-time):
+#   1. Developer ID Application certificate in the login keychain.
+#   2. TEAM_ID and NOTARY_PROFILE set — see release.env.example.
 #
 # Usage:
-#   CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
-#   NOTARY_PROFILE=idlewild-notary ./Scripts/notarize.sh
+#   ./Scripts/notarize.sh
+#
 set -euo pipefail
-cd "$(dirname "$0")/.."
+source "$(dirname "$0")/build-common.sh"
+cd "$PROJECT_ROOT"
 
-: "${CODESIGN_IDENTITY:?set CODESIGN_IDENTITY to your Developer ID Application identity}"
-: "${NOTARY_PROFILE:=idlewild-notary}"
+require_team_id
+require_notary_profile
 
-APP="build/Idlewild.app"
-ZIP="build/Idlewild.zip"
+IDENTITY="$(signing_identity)"
+[ "$IDENTITY" != "-" ] || die "No Developer ID Application identity for team $TEAM_ID.
+       Notarization requires a real certificate; adhoc will not do."
 
+APP="build/$APP_NAME.app"
+VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" App/Resources/Info.plist)
+ZIP="build/$APP_NAME-$VERSION.zip"
+
+say "1/5  Build and sign"
 ./Scripts/build.sh
 
-echo "==> verifying hardened runtime"
-codesign -d --entitlements - "$APP" 2>/dev/null | head -20
-codesign -dv --verbose=4 "$APP" 2>&1 | grep -E "Authority|flags" || true
-# Notarization is rejected without the runtime flag.
+# Notarization is rejected outright without the hardened runtime flag.
 codesign -dv "$APP" 2>&1 | grep -q "flags=.*runtime" \
-    || { echo "ERROR: hardened runtime missing"; exit 1; }
+    || die "hardened runtime missing — check the codesign --options runtime flag"
 
-echo "==> submitting to Apple"
+say "2/5  Zip for submission"
 rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"
-xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
 
-echo "==> stapling"
+say "3/5  Submit to Apple (typically 1-5 minutes)"
+xcrun notarytool submit "$ZIP" \
+    --keychain-profile "$NOTARY_PROFILE" \
+    --wait --timeout 20m
+
+say "4/5  Staple the ticket"
 xcrun stapler staple "$APP"
 xcrun stapler validate "$APP"
 
-echo "==> gatekeeper assessment (what a user's Mac will do)"
-spctl -a -vvv -t install "$APP"
+say "5/5  Gatekeeper assessment (what a user's Mac will actually do)"
+spctl -a -vvv -t execute "$APP" 2>&1 | head -4
 
-echo "notarized: $APP"
+# Re-zip so the distributed archive carries the stapled ticket.
+rm -f "$ZIP"
+ditto -c -k --keepParent "$APP" "$ZIP"
+
+printf "\n\033[1;32mDONE\033[0m\n"
+echo "   Stapled app: $APP"
+echo "   Zip:         $ZIP"
+echo "   Next:        ./Scripts/make-dmg.sh"
