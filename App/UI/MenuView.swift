@@ -1,146 +1,138 @@
 import SwiftUI
+import AppKit
 
+/// The menu bar menu.
+///
+/// Built with `.menuBarExtraStyle(.menu)`, so this is a real NSMenu - system
+/// highlighting, keyboard navigation, standard metrics - rather than a custom
+/// floating panel. That constrains the content to genuine menu items: Button,
+/// Text (renders disabled, useful for status lines), Divider, Section and Menu
+/// for submenus. No custom layout, which is the whole point.
 struct MenuView: View {
     @ObservedObject var monitor: Monitor
     @Environment(\.openSettings) private var openSettings
 
-    // Snapshotted when the menu opens rather than observed continuously, so a
-    // closed menu costs nothing at all.
-    @State private var top: [(pid: pid_t, name: String, pct: Double)] = []
-    @State private var ownDuty: Double = 0
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
+        status
 
-            if monitor.incidents.isEmpty {
-                Divider().padding(.vertical, 6)
-                calmState
-            } else {
-                ForEach(monitor.incidents) { inc in
-                    Divider().padding(.vertical, 6)
-                    IncidentRow(incident: inc, monitor: monitor)
-                }
+        if !monitor.incidents.isEmpty {
+            Divider()
+            ForEach(monitor.incidents) { incident in
+                IncidentMenu(incident: incident, monitor: monitor)
             }
-
-            if let problem = Notifier.authorizationProblem {
-                Divider().padding(.vertical, 6)
-                VStack(alignment: .leading, spacing: 4) {
-                    Label("Notifications are unavailable", systemImage: "bell.slash")
-                        .font(.caption.bold()).foregroundStyle(.orange)
-                    Text(problem).font(.caption2).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text("Idlewild still watches and still shows the flame above.")
-                        .font(.caption2).foregroundStyle(.tertiary)
-                    Button("Open Notification Settings") { Notifier.openSettings() }
-                        .buttonStyle(.link).font(.caption)
-                }
-            }
-
-            Divider().padding(.vertical, 6)
-            topList
-            Divider().padding(.vertical, 6)
-            footer
         }
-        .padding(12)
-        .frame(width: 340)
-        .onAppear {
-            top = monitor.topProcesses
-            ownDuty = monitor.ownDutyCycle
+
+        if Notifier.authorizationProblem != nil {
+            Divider()
+            Text("Notifications are turned off")
+            Button("Open Notification Settings…") { Notifier.openSettings() }
         }
+
+        Divider()
+        busiest
+
+        Divider()
+        Button(monitor.isPaused ? "Resume Monitoring" : "Pause Monitoring") {
+            monitor.togglePause()
+        }
+        Button("Settings…") { showSettings() }
+            .keyboardShortcut(",", modifiers: .command)
+
+        Divider()
+        Button("Quit Idlewild") { NSApp.terminate(nil) }
+            .keyboardShortcut("q", modifiers: .command)
     }
 
-    private var header: some View {
-        HStack {
-            Image(systemName: monitor.incidents.isEmpty ? "checkmark.circle.fill" : "flame.fill")
-                .foregroundStyle(monitor.incidents.isEmpty ? .green : .orange)
-            Text(monitor.incidents.isEmpty ? "Nothing running away" : "Runaway process detected")
-                .font(.headline)
-            Spacer()
-            if monitor.isPaused {
-                Text("PAUSED").font(.caption2.bold()).foregroundStyle(.secondary)
-            }
+    @ViewBuilder
+    private var status: some View {
+        if monitor.isPaused {
+            Text("Paused")
+        } else if monitor.incidents.isEmpty {
+            Text("Nothing running away")
+        } else {
+            Text(monitor.incidents.count == 1
+                 ? "1 process running away"
+                 : "\(monitor.incidents.count) processes running away")
         }
     }
 
-    private var calmState: some View {
-        Text("Watching for processes that hold above \(Int(monitor.settings.cpuThreshold))% of a core for \(Int(monitor.settings.sustainMinutes)) minutes.")
-            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-    }
-
-    private var topList: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text("BUSIEST NOW").font(.caption2.bold()).foregroundStyle(.tertiary)
+    @ViewBuilder
+    private var busiest: some View {
+        let top = monitor.topProcesses
+        Section("Busiest Now") {
             if top.isEmpty {
-                Text("idle").font(.caption).foregroundStyle(.secondary)
-            }
-            ForEach(top, id: \.pid) { p in
-                HStack(spacing: 6) {
-                    Text(p.name).font(.caption).lineLimit(1).truncationMode(.middle)
-                    Spacer(minLength: 8)
-                    Text(String(format: "%.0f%%", p.pct))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(p.pct > 80 ? .orange : .secondary)
+                Text("Idle")
+            } else {
+                ForEach(top, id: \.pid) { p in
+                    Text("\(p.name) — \(Int(p.pct))%")
                 }
             }
         }
     }
 
-    private var footer: some View {
-        HStack(spacing: 10) {
-            // Our own cost, always visible. A watchdog should be accountable to
-            // the same standard it enforces.
-            Text(String(format: "Idlewild: %.3f%% CPU", ownDuty))
-                .font(.caption2).foregroundStyle(.tertiary)
-            Spacer()
-            Button(monitor.isPaused ? "Resume" : "Pause") { monitor.togglePause() }
-                .buttonStyle(.link).font(.caption)
-            Button("Settings") { openSettings() }.buttonStyle(.link).font(.caption)
-            Button("Quit") { NSApplication.shared.terminate(nil) }.buttonStyle(.link).font(.caption)
+    /// An LSUIElement app is not activated by opening a window, so the Settings
+    /// window appears behind whatever the user was working in. Activate the app
+    /// and bring that specific window forward.
+    private func showSettings() {
+        openSettings()
+        NSApp.activate(ignoringOtherApps: true)
+        // The window exists only after openSettings() has been processed.
+        DispatchQueue.main.async {
+            let settings = NSApp.windows.first {
+                $0.identifier?.rawValue == "com_apple_SwiftUI_Settings_window"
+                    || $0.title == "Idlewild Settings"
+            }
+            settings?.makeKeyAndOrderFront(nil)
         }
     }
 }
 
-struct IncidentRow: View {
+/// One runaway process, as a submenu. The actions live one level down so the
+/// top level stays scannable when several things are misbehaving at once.
+private struct IncidentMenu: View {
     let incident: Incident
     @ObservedObject var monitor: Monitor
-    @State private var error: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(incident.name).font(.subheadline.bold()).lineLimit(1).truncationMode(.middle)
-            Text(incident.summary).font(.caption).foregroundStyle(.secondary)
+        Menu("\(incident.name) — \(incident.menuSummary)") {
+            Button("Force Quit") { perform { monitor.kill(incident) } }
+            Button("Pause It") { perform { monitor.suspend(incident) } }
+            Divider()
+            Button("Ignore This Time") { monitor.dismiss(incident) }
+            Button("Always Allow \(incident.binaryName)") { monitor.alwaysAllow(incident) }
+            Divider()
             if !incident.cause.isEmpty {
-                Text(incident.cause).font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                Text(incident.cause.prefix(1).uppercased() + incident.cause.dropFirst())
             }
-            // Only worth surfacing when it is the thermally expensive kind.
             if incident.heatWeight > 0.8 {
-                Label("on performance cores - this is what heats the machine",
-                      systemImage: "thermometer.high")
-                    .font(.caption2).foregroundStyle(.orange)
+                Text("On performance cores — this is what heats the machine")
             }
-            if let error {
-                Text(error).font(.caption2).foregroundStyle(.red)
+            if incident.isLeaking {
+                Text(String(format: "Memory growing %.0f MB/min", incident.growthMBPerMin))
             }
-            HStack(spacing: 6) {
-                Button("Force Quit") { act { monitor.kill(incident) } }
-                Button("Pause It")   { act { monitor.suspend(incident) } }
-                Button("Ignore")     { monitor.dismiss(incident) }
-                Button("Always Allow") { monitor.alwaysAllow(incident) }
-            }
-            .buttonStyle(.bordered).controlSize(.small)
-            Text("pid \(incident.pid) · \(incident.path)")
-                .font(.caption2).foregroundStyle(.tertiary)
-                .lineLimit(1).truncationMode(.middle)
+            Text("pid \(incident.pid)")
         }
     }
 
-    private func act(_ op: () -> ProcessActions.Result) {
+    /// A menu cannot show inline errors, so report a failure the native way.
+    private func perform(_ op: () -> ProcessActions.Result) {
         switch op() {
-        case .ok, .gone: error = nil
-        case .notPermitted: error = "Not permitted - this process belongs to another user."
-        case .failed(let e): error = "Failed (errno \(e))."
+        case .ok, .gone:
+            break
+        case .notPermitted:
+            alert("Not permitted",
+                  "\(incident.name) belongs to another user, so Idlewild cannot stop it.")
+        case .failed(let e):
+            alert("Could not stop \(incident.name)", "The system reported error \(e).")
         }
+    }
+
+    private func alert(_ title: String, _ body: String) {
+        let a = NSAlert()
+        a.messageText = title
+        a.informativeText = body
+        a.alertStyle = .warning
+        NSApp.activate(ignoringOtherApps: true)
+        a.runModal()
     }
 }

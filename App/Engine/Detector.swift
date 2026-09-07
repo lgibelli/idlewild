@@ -24,6 +24,17 @@ struct Incident: Identifiable, Equatable {
         if isLeaking { s += String(format: ", memory +%.0f MB/min", growthMBPerMin) }
         return s
     }
+
+    /// Compact enough for a single menu item title.
+    var menuSummary: String {
+        String(format: "%.0f%% for %@", cpuPercent, formatDuration(heldFor))
+    }
+
+    /// What "Always Allow" would actually add to the allowlist.
+    var binaryName: String {
+        let base = (path as NSString).lastPathComponent
+        return base.isEmpty ? name : base
+    }
 }
 
 func formatDuration(_ t: TimeInterval) -> String {

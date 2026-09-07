@@ -15,7 +15,9 @@ struct IdlewildApp: App {
             // this app exists to catch.
             Image(systemName: iconName)
         }
-        .menuBarExtraStyle(.window)
+        // .menu gives a real NSMenu - standard highlighting, keyboard
+        // navigation and metrics - instead of a custom floating panel.
+        .menuBarExtraStyle(.menu)
 
         Settings {
             SettingsView(monitor: monitor)
