@@ -4,6 +4,11 @@ struct MenuView: View {
     @ObservedObject var monitor: Monitor
     @Environment(\.openSettings) private var openSettings
 
+    // Snapshotted when the menu opens rather than observed continuously, so a
+    // closed menu costs nothing at all.
+    @State private var top: [(pid: pid_t, name: String, pct: Double)] = []
+    @State private var ownDuty: Double = 0
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -25,6 +30,10 @@ struct MenuView: View {
         }
         .padding(12)
         .frame(width: 340)
+        .onAppear {
+            top = monitor.topProcesses
+            ownDuty = monitor.ownDutyCycle
+        }
     }
 
     private var header: some View {
@@ -48,10 +57,10 @@ struct MenuView: View {
     private var topList: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text("BUSIEST NOW").font(.caption2.bold()).foregroundStyle(.tertiary)
-            if monitor.topProcesses.isEmpty {
+            if top.isEmpty {
                 Text("idle").font(.caption).foregroundStyle(.secondary)
             }
-            ForEach(monitor.topProcesses, id: \.pid) { p in
+            ForEach(top, id: \.pid) { p in
                 HStack(spacing: 6) {
                     Text(p.name).font(.caption).lineLimit(1).truncationMode(.middle)
                     Spacer(minLength: 8)
@@ -67,7 +76,7 @@ struct MenuView: View {
         HStack(spacing: 10) {
             // Our own cost, always visible. A watchdog should be accountable to
             // the same standard it enforces.
-            Text(String(format: "idlewild: %.3f%% CPU", monitor.ownDutyCycle))
+            Text(String(format: "Idlewild: %.3f%% CPU", ownDuty))
                 .font(.caption2).foregroundStyle(.tertiary)
             Spacer()
             Button(monitor.isPaused ? "Resume" : "Pause") { monitor.togglePause() }

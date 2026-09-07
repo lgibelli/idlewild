@@ -6,11 +6,17 @@ import UserNotifications
 @MainActor
 final class Monitor: ObservableObject {
 
+    // Published state drives the menu bar icon, so it must change only when the
+    // icon does - roughly never. Publishing per-scan values here would
+    // invalidate the label on every scan even with the menu closed, which is
+    // exactly the always-redrawing menu bar item this app exists to catch.
     @Published private(set) var incidents: [Incident] = []
-    @Published private(set) var topProcesses: [(pid: pid_t, name: String, pct: Double)] = []
     @Published private(set) var isPaused = false
-    @Published private(set) var lastScan: Date?
-    @Published private(set) var ownCPUms: Double = 0
+
+    // Read by the menu when it opens; deliberately not published.
+    private(set) var topProcesses: [(pid: pid_t, name: String, pct: Double)] = []
+    private(set) var lastScan: Date?
+    private(set) var ownCPUms: Double = 0
 
     let settings = AppSettings()
     /// Owned exclusively by `queue`. Every access - including from the UI -
