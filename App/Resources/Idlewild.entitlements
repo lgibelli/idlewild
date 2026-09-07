@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Deliberately NOT sandboxed.
+
+         Measured under App Sandbox in a real .app bundle, all of the following
+         return EPERM: proc_listpids, proc_pid_rusage, and kill(). The app
+         cannot enumerate, measure, or stop a runaway process inside the
+         sandbox, and no entitlement Apple grants to App Store apps lifts that.
+         This is why comparable tools (App Tamer, iStat Menus, TG Pro) all ship
+         Developer ID + notarized instead. See docs/APP-STORE.md. -->
+
+    <!-- Hardened Runtime is still required for notarization. We spawn
+         /usr/bin/sample, which needs no entitlement, and load no third-party
+         libraries, so the defaults are all we need. -->
+    <key>com.apple.security.automation.apple-events</key>
+    <false/>
+</dict>
+</plist>

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>it.salamacchine.idlewild</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/nervous/devel/idlewild/idlewild</string>
+        <string>watch</string>
+    </array>
+
+    <key>RunAtLoad</key>  <true/>
+    <key>KeepAlive</key>  <true/>
+
+    <!-- Background: launchd gives it low CPU priority and throttled I/O. Our
+         work is trivial, so being descheduled in favour of anything else is
+         exactly right - a watchdog must never compete with real work. -->
+    <key>ProcessType</key>       <string>Background</string>
+    <key>LowPriorityIO</key>     <true/>
+    <key>LowPriorityBackgroundIO</key> <true/>
+    <key>Nice</key>              <integer>10</integer>
+
+    <key>StandardOutPath</key>   <string>/Users/nervous/Library/Logs/idlewild.log</string>
+    <key>StandardErrorPath</key> <string>/Users/nervous/Library/Logs/idlewild.log</string>
+</dict>
+</plist>
