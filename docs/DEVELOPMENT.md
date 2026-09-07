@@ -2,34 +2,74 @@
 
 ## "Notifications are not allowed for this application"
 
-If `requestAuthorization` fails with this error, check whether a **Focus mode is
-active** before looking anywhere else. It is the first thing to rule out, and it
-is easy to misattribute to signing.
+**Cause: stale LaunchServices registrations left by repeated rebuilds.** The
+authorization prompt is never shown, and the app never appears in
+System Settings → Notifications, so there is no way to enable it by hand either.
 
-This was diagnosed by elimination. A twenty-line app that does nothing but call
-`requestAuthorization` failed identically, which ruled out any Idlewild bug.
-Then, one at a time:
+During development this bundle got rebuilt and reinstalled a dozen times, and
+LaunchServices accumulated three registrations for one bundle identifier — one
+of them pointing at `build/dmg/Idlewild.app`, a staging path `make-dmg.sh`
+deletes after building the disk image. `usernoted` then cannot resolve the
+bundle:
+
+```
+usernoted: _LSBundleCopyOrCheckNode: cached node not found,
+           _LSBundleCreateNode for bundleID 3168 returned -43     # fnfErr
+```
+
+It still accepts the connection and `setNotificationCategories` succeeds, which
+makes this misleading — only authorization fails.
+
+### The fix
+
+```sh
+LSR=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+
+# What does LaunchServices think exists?
+$LSR -dump | grep -i idlewild | grep -iE '^path' | sort -u
+
+# Drop stale and development copies, keep the installed one
+$LSR -u /path/to/any/deleted/Idlewild.app
+$LSR -f /Applications/Idlewild.app
+
+killall usernoted        # respawns immediately
+```
+
+Then relaunch. The app now appears in System Settings → Notifications and can be
+enabled there; `requestAuthorization` returns `granted=true` afterwards.
+
+`make-dmg.sh` now unregisters its staging copy before deleting it, so the
+condition should not recur.
+
+### What it was not
+
+Diagnosed by elimination, and three plausible-sounding hypotheses were wrong
+before the right one. A twenty-line app that does nothing but call
+`requestAuthorization` failed identically, which cleared any Idlewild bug. Then:
 
 | hypothesis | test | result |
 |---|---|---|
-| adhoc signing | signed with Developer ID | still failed |
+| adhoc signing (unstable cdhash) | signed with Developer ID | still failed |
 | not notarized | notarized + stapled, Gatekeeper accepted | still failed |
 | MDM restriction | `profiles status -type enrollment` | not enrolled |
 | `LSUIElement` agent app | built a regular Dock app | still failed |
 | cached denial | inspected `com.apple.ncprefs` | no record existed |
+| a Focus mode | parsed `DoNotDisturb/DB/Assertions.json` | zero active assertions |
+| display mirroring / sleep DND | `system_profiler SPDisplaysDataType` | `Mirror: Off` |
 
-What remained was a scheduled **Sleep Focus** asserted in
-`~/Library/DoNotDisturb/DB/Assertions.json`. Other apps had delivered
-notifications normally earlier the same day, before it began.
+The lesson: ask the daemon rather than reasoning about it. `log stream
+--predicate 'process == "usernoted"'` produced the `-43` in one shot, after an
+hour of hypotheses produced nothing.
 
-To check the current state:
+Note that Focus modes are still worth checking — an active Focus genuinely
+suppresses delivery — but it does not cause this error. To check:
 
 ```sh
-plutil -p ~/Library/DoNotDisturb/DB/Assertions.json | grep -A3 assertionDetails
+plutil -p ~/Library/DoNotDisturb/DB/Assertions.json
 ```
 
-`assertionDetailsUserVisibleEndDate` is a Mac absolute time — add 978307200 for
-a Unix timestamp.
+An assertion is active only if no invalidation record shares its
+`assertionUUID`; simply counting records will mislead you.
 
 ## Notifications do not persist across adhoc-signed builds
 

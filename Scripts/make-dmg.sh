@@ -26,6 +26,13 @@ ln -s /Applications "$STAGE/Applications"     # the familiar drag-to-install lay
 
 say "Creating $DMG"
 hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+
+# Unregister the staged copy before deleting it. LaunchServices indexes any app
+# bundle it sees, and a registration pointing at a deleted path makes usernoted
+# fail to resolve the bundle (_LSBundleCreateNode ... returned -43), which can
+# stop the app appearing in System Settings > Notifications at all.
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+[ -x "$LSREGISTER" ] && "$LSREGISTER" -u "$STAGE/$APP_NAME.app" 2>/dev/null || true
 rm -rf "$STAGE"
 
 if [ "$IDENTITY" != "-" ]; then
