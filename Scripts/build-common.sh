@@ -21,9 +21,18 @@ require_team_id() {
        Export it, or copy release.env.example to release.env and fill it in."
 }
 
-require_notary_profile() {
-  [ -n "$NOTARY_PROFILE" ] || die "NOTARY_PROFILE is not set.
-       Export it, or set it in release.env."
+# True when App Store Connect API key credentials are available. Preferred in CI,
+# where a login keychain is awkward to provision.
+have_api_key() {
+  [ -n "${APPLE_API_KEY_PATH:-}" ] && [ -n "${APPLE_API_KEY_ID:-}" ] \
+    && [ -n "${APPLE_API_ISSUER:-}" ]
+}
+
+require_notary_credentials() {
+  have_api_key && return 0
+  [ -n "$NOTARY_PROFILE" ] || die "No notarization credentials.
+       Either set APPLE_API_KEY_PATH / APPLE_API_KEY_ID / APPLE_API_ISSUER,
+       or set NOTARY_PROFILE in release.env."
   xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" \
       --output-format json >/dev/null 2>&1 || \
     die "notarytool keychain profile '$NOTARY_PROFILE' is missing or invalid.
@@ -31,6 +40,18 @@ require_notary_profile() {
          xcrun notarytool store-credentials '$NOTARY_PROFILE' \\
            --apple-id 'you@example.com' --team-id '$TEAM_ID' \\
            --password '<app-specific-password>'"
+}
+
+# notary_submit <path-to-zip-or-dmg>
+notary_submit() {
+  if have_api_key; then
+    xcrun notarytool submit "$1" \
+      --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" \
+      --issuer "$APPLE_API_ISSUER" --wait --timeout 20m
+  else
+    xcrun notarytool submit "$1" \
+      --keychain-profile "$NOTARY_PROFILE" --wait --timeout 20m
+  fi
 }
 
 # Resolves the Developer ID Application identity for TEAM_ID, falling back to

@@ -10,7 +10,9 @@
 #
 # Prereqs (one-time):
 #   1. Developer ID Application certificate in the login keychain.
-#   2. TEAM_ID and NOTARY_PROFILE set — see release.env.example.
+#   2. TEAM_ID set, plus either NOTARY_PROFILE (a notarytool keychain profile)
+#      or APPLE_API_KEY_PATH / APPLE_API_KEY_ID / APPLE_API_ISSUER for CI.
+#      See release.env.example.
 #
 # Usage:
 #   ./Scripts/notarize.sh
@@ -20,7 +22,7 @@ source "$(dirname "$0")/build-common.sh"
 cd "$PROJECT_ROOT"
 
 require_team_id
-require_notary_profile
+require_notary_credentials
 
 IDENTITY="$(signing_identity)"
 [ "$IDENTITY" != "-" ] || die "No Developer ID Application identity for team $TEAM_ID.
@@ -49,9 +51,7 @@ rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"
 
 say "3/5  Submit to Apple (typically 1-5 minutes)"
-xcrun notarytool submit "$ZIP" \
-    --keychain-profile "$NOTARY_PROFILE" \
-    --wait --timeout 20m
+notary_submit "$ZIP"
 
 say "4/5  Staple the ticket"
 xcrun stapler staple "$APP"

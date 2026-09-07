@@ -39,9 +39,9 @@ if [ "$IDENTITY" != "-" ]; then
     say "Signing the DMG"
     codesign --force --sign "$IDENTITY" --timestamp "$DMG"
 
-    if [ -n "$NOTARY_PROFILE" ]; then
+    if have_api_key || [ -n "$NOTARY_PROFILE" ]; then
         say "Notarizing the DMG"
-        xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait --timeout 20m
+        notary_submit "$DMG"
         xcrun stapler staple "$DMG"
         xcrun stapler validate "$DMG"
     fi
