@@ -19,7 +19,31 @@ enum Notifier {
     @MainActor static var authorizationProblem: String?
 
     static let categoryID = "it.salamacchine.idlewild.runaway"
-    enum Action: String { case kill = "KILL", suspend = "SUSPEND", ignore = "IGNORE" }
+    /// Pausing frees no memory, so a memory notification offers no Pause It.
+    static let memoryCategoryID = "it.salamacchine.idlewild.memory"
+    enum Action: String {
+        case kill = "KILL"
+        case suspend = "SUSPEND"
+        case ignore = "IGNORE"              // this notification only
+        case snoozeHour = "SNOOZE_HOUR"
+        case snoozeToday = "SNOOZE_TODAY"
+        case allowAlways = "ALLOW_ALWAYS"
+    }
+
+    /// Shared by both categories. "Ignore" dismisses this one notification;
+    /// the snoozes stop reporting for a while and then lapse on their own, so a
+    /// one-off nuisance never quietly becomes a permanent blind spot.
+    private static var snoozeActions: [UNNotificationAction] {
+        [
+            UNNotificationAction(identifier: Action.ignore.rawValue, title: "Ignore", options: []),
+            UNNotificationAction(identifier: Action.snoozeHour.rawValue,
+                                 title: "Ignore for 1 Hour", options: []),
+            UNNotificationAction(identifier: Action.snoozeToday.rawValue,
+                                 title: "Ignore Until Tomorrow", options: []),
+            UNNotificationAction(identifier: Action.allowAlways.rawValue,
+                                 title: "Always Ignore This App", options: []),
+        ]
+    }
 
     static func configure(delegate: UNUserNotificationCenterDelegate) {
         let c = UNUserNotificationCenter.current()
@@ -31,11 +55,14 @@ enum Notifier {
                                      options: [.destructive]),
                 UNNotificationAction(identifier: Action.suspend.rawValue, title: "Pause It",
                                      options: []),
-                UNNotificationAction(identifier: Action.ignore.rawValue, title: "Ignore",
-                                     options: []),
-            ],
+            ] + snoozeActions,
             intentIdentifiers: [], options: [])
-        c.setNotificationCategories([category])
+        let kill = UNNotificationAction(identifier: Action.kill.rawValue, title: "Force Quit",
+                                        options: [.destructive])
+        let memory = UNNotificationCategory(identifier: memoryCategoryID,
+                                            actions: [kill] + snoozeActions,
+                                            intentIdentifiers: [], options: [])
+        c.setNotificationCategories([category, memory])
         c.requestAuthorization(options: [.alert, .sound]) { granted, error in
             Task { @MainActor in
                 if let error {
@@ -60,10 +87,19 @@ enum Notifier {
     static func post(incident: Incident, enabled: Bool) {
         guard enabled else { return }
         let n = UNMutableNotificationContent()
-        n.title = "\(incident.name) is running away"
+        switch incident.kind {
+        case .cpu:
+            n.title = "\(incident.name) is running away"
+            n.body = incident.cause.isEmpty ? "Sustained high CPU." : incident.cause.prefix(1).uppercased() + incident.cause.dropFirst() + "."
+            n.categoryIdentifier = categoryID
+        case .memory:
+            n.title = incident.underPressure
+                ? "\(incident.name) is eating the memory"
+                : "\(incident.name) keeps growing"
+            n.body = incident.cause.prefix(1).uppercased() + incident.cause.dropFirst() + "."
+            n.categoryIdentifier = memoryCategoryID
+        }
         n.subtitle = incident.summary
-        n.body = incident.cause.isEmpty ? "Sustained high CPU." : incident.cause.prefix(1).uppercased() + incident.cause.dropFirst() + "."
-        n.categoryIdentifier = categoryID
         n.userInfo = ["pid": Int(incident.pid), "name": incident.name]
         n.sound = .default
         UNUserNotificationCenter.current().add(

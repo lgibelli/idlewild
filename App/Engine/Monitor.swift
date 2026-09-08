@@ -20,6 +20,9 @@ final class Monitor: ObservableObject {
     // exactly the always-redrawing menu bar item this app exists to catch.
     @Published private(set) var incidents: [Incident] = []
     @Published private(set) var isPaused = false
+    /// Mirrors the setting so the label can read it without observing
+    /// UserDefaults. Changes only when the user flips the switch.
+    @Published private(set) var colouredIcon = false
 
     private(set) var lastScan: Date?
     private(set) var ownCPUms: Double = 0
@@ -33,6 +36,7 @@ final class Monitor: ObservableObject {
     private let detector: Detector
     private let queue = DispatchQueue(label: "it.salamacchine.idlewild.scan", qos: .utility)
     private var timer: DispatchSourceTimer?
+    private var pressureSource: DispatchSourceMemoryPressure?
     private var currentInterval: Double = 0
     private let started = Date()
 
@@ -40,18 +44,36 @@ final class Monitor: ObservableObject {
         updates = UpdateChecker(settings: settings)
         detector = Detector(settings: settings)
         AppDelegate.monitor = self      // so notification actions can reach us
+        colouredIcon = settings.colouredIcon
         start()
     }
 
     func start() {
         isPaused = false
         schedule(interval: settings.calmInterval)
+        watchPressure()
     }
 
     func pause() {
         isPaused = true
         timer?.cancel()
         timer = nil
+        pressureSource?.cancel()
+        pressureSource = nil
+    }
+
+    /// The kernel tells us when the machine starts swapping; we do not poll for
+    /// it. This source costs nothing until it fires, and when it does the
+    /// answer to "who is eating the memory" is wanted now, not in two minutes.
+    private func watchPressure() {
+        pressureSource?.cancel()
+        let src = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: queue)
+        src.setEventHandler { [weak self] in
+            log.notice("memory pressure event")
+            self?.tick()
+        }
+        src.resume()
+        pressureSource = src
     }
 
     func togglePause() { isPaused ? start() : pause() }
@@ -75,8 +97,10 @@ final class Monitor: ObservableObject {
         let suspect = detector.hasActiveSuspect
 
         // Diagnosis is expensive, so it happens here on the utility queue,
-        // never on main, and only for confirmed incidents.
+        // never on main, and only for confirmed CPU incidents. A stack sample
+        // says nothing about a leak; memory incidents arrive already explained.
         let enriched = found.map { inc -> Incident in
+            guard inc.kind == .cpu else { return inc }
             var i = inc
             i.cause = Diagnoser.diagnose(pid: inc.pid,
                                         processName: (inc.path as NSString).lastPathComponent).cause
@@ -90,7 +114,7 @@ final class Monitor: ObservableObject {
             for i in enriched {
                 self.incidents.removeAll { $0.pid == i.pid }
                 self.incidents.append(i)
-                log.notice("incident: \(i.name, privacy: .public) pid \(i.pid) \(i.cpuPercent, format: .fixed(precision: 0))% cause=\(i.cause, privacy: .public)")
+                log.notice("incident: \(i.name, privacy: .public) pid \(i.pid) \(i.summary, privacy: .public) cause=\(i.cause, privacy: .public)")
                 Notifier.post(incident: i, enabled: self.settings.notificationsEnabled)
             }
             let want = suspect ? self.settings.busyInterval : self.settings.calmInterval
@@ -118,6 +142,23 @@ final class Monitor: ObservableObject {
         queue.async { [detector] in detector.suppress(pid: pid) }
     }
 
+    /// Stop reporting this process for a while. Unlike the allowlist this
+    /// lapses on its own, so a nuisance dismissed once does not become a
+    /// permanent blind spot.
+    func snooze(_ incident: Incident, for interval: TimeInterval) {
+        snooze(incident, until: Date().addingTimeInterval(interval))
+    }
+
+    func snooze(_ incident: Incident, until: Date) {
+        settings.snooze(path: incident.path, name: incident.name, until: until)
+        log.notice("snoozed \(incident.name, privacy: .public) until \(until, privacy: .public)")
+        dismiss(incident)
+    }
+
+    func snoozeUntilTomorrow(_ incident: Incident) {
+        snooze(incident, until: AppSettings.nextMidnight())
+    }
+
     func alwaysAllow(_ incident: Incident) {
         settings.allow(path: incident.path)
         dismiss(incident)
@@ -129,6 +170,7 @@ final class Monitor: ObservableObject {
         let s = settings
         queue.async { [detector] in detector.settings = s }
         updates.settingsChanged()
+        if colouredIcon != settings.colouredIcon { colouredIcon = settings.colouredIcon }
         if !isPaused { schedule(interval: settings.calmInterval) }
     }
 

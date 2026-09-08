@@ -14,6 +14,7 @@ import AppKit
 struct MenuView: View {
     @ObservedObject var monitor: Monitor
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         status
@@ -44,6 +45,10 @@ struct MenuView: View {
         }
         Button("Settings…") { showSettings() }
             .keyboardShortcut(",", modifiers: .command)
+        Button("About Idlewild") {
+            openWindow(id: "about")
+            NSApp.activate(ignoringOtherApps: true)
+        }
 
         Divider()
         Button("Quit Idlewild") { NSApp.terminate(nil) }
@@ -89,10 +94,14 @@ private struct IncidentMenu: View {
     var body: some View {
         Menu("\(incident.name) — \(incident.menuSummary)") {
             Button("Force Quit") { perform { monitor.kill(incident) } }
-            Button("Pause It") { perform { monitor.suspend(incident) } }
+            if incident.canPause {
+                Button("Pause It") { perform { monitor.suspend(incident) } }
+            }
             Divider()
             Button("Ignore This Time") { monitor.dismiss(incident) }
-            Button("Always Allow \(incident.binaryName)") { monitor.alwaysAllow(incident) }
+            Button("Ignore for 1 Hour") { monitor.snooze(incident, for: 3600) }
+            Button("Ignore Until Tomorrow") { monitor.snoozeUntilTomorrow(incident) }
+            Button("Always Ignore \(incident.binaryName)") { monitor.alwaysAllow(incident) }
             Divider()
             if !incident.cause.isEmpty {
                 Text(incident.cause.prefix(1).uppercased() + incident.cause.dropFirst())
@@ -100,10 +109,25 @@ private struct IncidentMenu: View {
             if incident.heatWeight > 0.8 {
                 Text("On performance cores — this is what heats the machine")
             }
-            if incident.isLeaking {
-                Text(String(format: "Memory growing %.0f MB/min", incident.growthMBPerMin))
+            if incident.kind == .memory {
+                Text(String(format: "Using %@, %.0f%% of memory", incident.footprintText,
+                            incident.memoryShare * 100))
             }
-            Text("pid \(incident.pid)")
+            if incident.isLeaking {
+                Text(incident.kind == .memory && incident.heldFor > 30
+                     ? String(format: "Growing %.0f MB/min for %@", incident.growthMBPerMin,
+                              formatDuration(incident.heldFor))
+                     : String(format: "Memory growing %.0f MB/min", incident.growthMBPerMin))
+            }
+            if let f = incident.fillsIn, incident.kind == .memory {
+                Text("At this rate it fills memory in \(formatDuration(f))")
+            }
+            if incident.underPressure && incident.swapUsedBytes > 0 {
+                Text("The machine is swapping — \(formatBytes(incident.swapUsedBytes)) in use")
+            }
+            // verbatim: interpolating an Int into a Text key formats it with the
+            // locale's grouping separator, so pid 26121 came out as "26.121".
+            Text(verbatim: "pid \(incident.pid)")
         }
     }
 

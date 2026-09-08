@@ -1,3 +1,60 @@
+# Idlewild 1.1.0
+
+Idlewild now watches memory as well as CPU.
+
+## Memory
+
+Two things raise a memory alarm:
+
+- **A leak.** Idlewild keeps a short history of each large process's physical
+  footprint and fits a straight line through it. A leak is a line: positive
+  slope, r² of at least 0.85, still climbing. Honest work is a staircase
+  (loaded something, stopped) or a sawtooth (allocate, collect), and both fit a
+  line badly. The alarm fires only when the process also holds more than a
+  share of physical RAM (default 50%), has been climbing for the whole window
+  (default 10 minutes), has grown by a meaningful amount relative to its own
+  size, and at that rate would fill the rest of memory within a horizon
+  (default 12 hours). The sentence you get carries the evidence: "memory
+  climbing in a straight line for 25 min, usually a leak; at this rate it fills
+  memory in 3.1 hours".
+- **Memory pressure.** When the kernel reports that the machine is swapping,
+  Idlewild names the single largest process that is not on the allowlist,
+  whether or not it is growing. One process per pressure episode. This is
+  push-based: the kernel wakes Idlewild, Idlewild does not poll for it.
+
+Memory incidents offer Force Quit but not Pause It: a stopped process keeps
+every byte, so pausing would leave you exactly where you were.
+
+The data was already there. Every scan has always read each process's physical
+footprint through `proc_pid_rusage`; 1.1.0 keeps a few points of history for
+processes above a quarter of the share threshold and adds one `sysctl` per scan
+for the pressure level. The self-test puts the per-scan cost up by about 10%.
+
+Virtual size is deliberately ignored. On macOS every process maps the shared
+cache and reserves address space, so even TextEdit reports hundreds of
+gigabytes; the number carries no information.
+
+## Settings
+
+Settings is now four panes: **General** (cadence, notifications, login item,
+updates, icon colour), **CPU** and **Memory** (a switch for each, both on by
+default, and their thresholds), and **Exceptions**. About moved out of
+Settings into the menu, since it is not a setting.
+
+## Also
+
+- **Colour the flame** (General): an orange flame instead of the monochrome one
+  when something is running away. Off by default, since most people keep the
+  menu bar monochrome.
+- The pid in an incident's submenu was formatted with the locale's grouping
+  separator ("26.121"). It is now plain.
+- The CLI takes `--memory-share PCT`, `--memory-sustain MIN`,
+  `--memory-fill HOURS`, `--no-memory` and `--no-cpu`, and reports a
+  `MEMORY HOG` block alongside `RUNAWAY PROCESS`.
+- The end-to-end test now spawns a deliberate memory leak alongside the CPU
+  burner and asserts that each is reported for the right reason, neither for
+  the wrong one, and that the leak comes with a fill-time projection.
+
 # Idlewild 1.0.0
 
 A macOS menu bar app that notices when a process has been running away with a

@@ -13,89 +13,118 @@ struct SettingsView: View {
 
     var body: some View {
         TabView {
-            DetectionPane(monitor: monitor)
-                .tabItem { Label("Detection", systemImage: "gauge.with.dots.needle.33percent") }
+            GeneralPane(monitor: monitor)
+                .tabItem { Label("General", systemImage: "gearshape") }
+            CPUPane(monitor: monitor)
+                .tabItem { Label("CPU", systemImage: "cpu") }
+            MemoryPane(monitor: monitor)
+                .tabItem { Label("Memory", systemImage: "memorychip") }
             ExceptionsPane(monitor: monitor)
                 .tabItem { Label("Exceptions", systemImage: "checkmark.shield") }
-            AboutPane(monitor: monitor)
-                .tabItem { Label("About", systemImage: "info.circle") }
         }
-        .frame(width: 560, height: 496)
+        .frame(width: 560, height: 420)
     }
 }
 
-// MARK: - Detection
+// MARK: - Shared pieces
 
-private struct DetectionPane: View {
+/// Reads as a sentence and updates live, which removes the need for a
+/// paragraph of explanation under every control.
+private struct Summary: View {
+    let markdown: String
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "text.bubble")
+                .foregroundStyle(.secondary)
+                .font(.system(size: 13))
+                .padding(.top, 1)
+            // Markdown rather than Text concatenation, which is deprecated.
+            Text((try? AttributedString(markdown: markdown)) ?? AttributedString(markdown))
+                .foregroundStyle(.secondary)
+        }
+        .font(.callout)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+/// A switch with a one-line explanation underneath, the shape every toggle in
+/// Settings takes so the panes read alike.
+///
+/// Laid out by hand rather than as Toggle's own label: a switch-style Toggle
+/// sizes itself to its content and the VStack centres it, so three rows with
+/// captions of different lengths stagger across the pane. Here the text is
+/// pinned to the leading edge and the switch to the trailing one.
+private struct SwitchRow: View {
+    let title: String
+    let caption: String
+    @Binding var isOn: Bool
+    var body: some View {
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                Text(caption)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Toggle("", isOn: $isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+        }
+    }
+}
+
+private func minutes(_ m: Double) -> String {
+    let n = Int(m)
+    return "\(n) minute\(n == 1 ? "" : "s")"
+}
+
+// MARK: - General
+
+private struct GeneralPane: View {
     @ObservedObject var monitor: Monitor
-    @State private var threshold: Double = 80
-    @State private var sustain: Double = 5
     @State private var interval: Double = 120
     @State private var notify = true
     @State private var launchAtLogin = false
     @State private var checkUpdates = true
+    @State private var colouredIcon = false
     @State private var loginError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            summary
-
             GroupBox {
-                VStack(spacing: 14) {
-                    SliderRow(title: "CPU threshold",
-                              value: $threshold, range: 30...200, step: 5,
-                              display: "\(Int(threshold))%",
-                              hint: "of one core") { save() }
-                    Divider()
-                    SliderRow(title: "Held for",
-                              value: $sustain, range: 1...30, step: 1,
-                              display: "\(Int(sustain)) min",
-                              hint: "before alerting") { save() }
-                    Divider()
-                    SliderRow(title: "Check every",
-                              value: $interval, range: 30...300, step: 15,
-                              display: "\(Int(interval))s",
-                              hint: "when calm") { save() }
-                }
-                .padding(.vertical, 4)
+                SliderRow(title: "Check every",
+                          value: $interval, range: 30...300, step: 15,
+                          display: "\(Int(interval))s",
+                          hint: "when calm") { save() }
+                    .padding(.vertical, 4)
             }
 
             GroupBox {
                 VStack(spacing: 10) {
-                    Toggle(isOn: $notify) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text("Show notifications")
-                            Text("The menu bar icon changes either way.")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                    .onChange(of: notify) { _, _ in save() }
-
+                    SwitchRow(title: "Show notifications",
+                              caption: "The menu bar icon changes either way.",
+                              isOn: $notify)
+                        .onChange(of: notify) { _, _ in save() }
                     Divider()
-
-                    Toggle(isOn: $launchAtLogin) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text("Launch at login")
-                            Text("A watchdog you have to remember to start is not much of a watchdog.")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                    .onChange(of: launchAtLogin) { _, v in setLogin(v) }
-
+                    SwitchRow(title: "Colour the flame",
+                              caption: "Orange when something is running away. Off by default; most people keep the menu bar monochrome.",
+                              isOn: $colouredIcon)
+                        .onChange(of: colouredIcon) { _, _ in save() }
                     Divider()
-
-                    Toggle(isOn: $checkUpdates) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text("Check for updates")
-                            Text("Contacts salamacchine.it once a day. Nothing is downloaded or installed automatically.")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                    .onChange(of: checkUpdates) { _, _ in save() }
+                    SwitchRow(title: "Launch at login",
+                              caption: "A watchdog you have to remember to start is not much of a watchdog.",
+                              isOn: $launchAtLogin)
+                        .onChange(of: launchAtLogin) { _, v in setLogin(v) }
+                    Divider()
+                    SwitchRow(title: "Check for updates",
+                              caption: "Contacts salamacchine.it once a day. Nothing is downloaded or installed automatically.",
+                              isOn: $checkUpdates)
+                        .onChange(of: checkUpdates) { _, _ in save() }
                 }
-                // macOS renders Toggle as a checkbox inside a form-like layout
-                // unless the switch style is requested explicitly.
-                .toggleStyle(.switch)
                 .padding(.vertical, 4)
             }
 
@@ -110,46 +139,19 @@ private struct DetectionPane: View {
         .onAppear(perform: load)
     }
 
-    /// Reads as a sentence and updates live, which removes the need for a
-    /// paragraph of explanation under every control.
-    private var summary: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "text.bubble")
-                .foregroundStyle(.secondary)
-                .font(.system(size: 13))
-                .padding(.top, 1)
-            // Markdown rather than Text concatenation, which is deprecated.
-            Text(summaryText).foregroundStyle(.secondary)
-        }
-        .font(.callout)
-        .fixedSize(horizontal: false, vertical: true)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    private var summaryText: AttributedString {
-        let mins = Int(sustain)
-        let md = "Alert me when a process holds above **\(Int(threshold))%** of one core "
-               + "for **\(mins) minute\(mins == 1 ? "" : "s")**."
-        return (try? AttributedString(markdown: md)) ?? AttributedString(md)
-    }
-
     private func load() {
-        threshold = monitor.settings.cpuThreshold
-        sustain = monitor.settings.sustainMinutes
         interval = monitor.settings.calmInterval
         notify = monitor.settings.notificationsEnabled
         launchAtLogin = SMAppService.mainApp.status == .enabled
         checkUpdates = monitor.settings.checkForUpdates
+        colouredIcon = monitor.settings.colouredIcon
     }
 
     private func save() {
-        monitor.settings.cpuThreshold = threshold
-        monitor.settings.sustainMinutes = sustain
         monitor.settings.calmInterval = interval
         monitor.settings.notificationsEnabled = notify
         monitor.settings.checkForUpdates = checkUpdates
+        monitor.settings.colouredIcon = colouredIcon
         monitor.settingsChanged()
     }
 
@@ -161,8 +163,136 @@ private struct DetectionPane: View {
         } catch {
             loginError = "Could not change login item: \(error.localizedDescription)"
             launchAtLogin = SMAppService.mainApp.status == .enabled
-        checkUpdates = monitor.settings.checkForUpdates
         }
+    }
+}
+
+// MARK: - CPU
+
+private struct CPUPane: View {
+    @ObservedObject var monitor: Monitor
+    @State private var enabled = true
+    @State private var threshold: Double = 80
+    @State private var sustain: Double = 5
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Summary(markdown: enabled
+                ? "Alert me when a process holds above **\(Int(threshold))%** of one core for **\(minutes(sustain))**."
+                : "CPU is not being watched.")
+
+            GroupBox {
+                VStack(spacing: 14) {
+                    SwitchRow(title: "Watch CPU",
+                              caption: "A process holding a core for longer than a build or an export should.",
+                              isOn: $enabled)
+                        .onChange(of: enabled) { _, _ in save() }
+                    Divider()
+                    SliderRow(title: "Threshold",
+                              value: $threshold, range: 30...200, step: 5,
+                              display: "\(Int(threshold))%",
+                              hint: "of one core") { save() }
+                    Divider()
+                    SliderRow(title: "Held for",
+                              value: $sustain, range: 1...30, step: 1,
+                              display: "\(Int(sustain)) min",
+                              hint: "before alerting") { save() }
+                }
+                .padding(.vertical, 4)
+                .disabled(!enabled)
+            }
+
+            Text("The sustain window is the single most important setting. 100% for 30 seconds is a build; for nine hours it is a bug.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 0)
+        }
+        .padding(20)
+        .onAppear(perform: load)
+    }
+
+    private func load() {
+        enabled = monitor.settings.cpuEnabled
+        threshold = monitor.settings.cpuThreshold
+        sustain = monitor.settings.sustainMinutes
+    }
+
+    private func save() {
+        monitor.settings.cpuEnabled = enabled
+        monitor.settings.cpuThreshold = threshold
+        monitor.settings.sustainMinutes = sustain
+        monitor.settingsChanged()
+    }
+}
+
+// MARK: - Memory
+
+private struct MemoryPane: View {
+    @ObservedObject var monitor: Monitor
+    @State private var enabled = true
+    @State private var share: Double = 50
+    @State private var sustain: Double = 10
+    @State private var fillHours: Double = 12
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Summary(markdown: enabled
+                ? "Alert me when a process uses more than **\(Int(share))%** of memory (\(shareText)), "
+                  + "has been growing steadily for **\(minutes(sustain))**, and at that rate would fill "
+                  + "memory within **\(Int(fillHours)) hour\(Int(fillHours) == 1 ? "" : "s")**. "
+                  + "Also name the largest process when the machine starts swapping."
+                : "Memory is not being watched.")
+
+            GroupBox {
+                VStack(spacing: 14) {
+                    SwitchRow(title: "Watch memory",
+                              caption: "A leak climbs in a straight line and never plateaus; honest work loads something and stops.",
+                              isOn: $enabled)
+                        .onChange(of: enabled) { _, _ in save() }
+                    Divider()
+                    SliderRow(title: "Threshold",
+                              value: $share, range: 10...90, step: 5,
+                              display: "\(Int(share))%",
+                              hint: "of memory, \(shareText)") { save() }
+                    Divider()
+                    SliderRow(title: "Growing for",
+                              value: $sustain, range: 2...60, step: 1,
+                              display: "\(Int(sustain)) min",
+                              hint: "in a straight line") { save() }
+                    Divider()
+                    SliderRow(title: "Fills memory in",
+                              value: $fillHours, range: 1...48, step: 1,
+                              display: "\(Int(fillHours)) h",
+                              hint: "or sooner") { save() }
+                }
+                .padding(.vertical, 4)
+                .disabled(!enabled)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(20)
+        .onAppear(perform: load)
+    }
+
+    private var shareText: String {
+        formatBytes(UInt64(Double(HostMemory.physical) * share / 100))
+    }
+
+    private func load() {
+        enabled = monitor.settings.memoryEnabled
+        share = monitor.settings.memoryShareThreshold
+        sustain = monitor.settings.memorySustainMinutes
+        fillHours = monitor.settings.memoryFillHours
+    }
+
+    private func save() {
+        monitor.settings.memoryEnabled = enabled
+        monitor.settings.memoryShareThreshold = share
+        monitor.settings.memorySustainMinutes = sustain
+        monitor.settings.memoryFillHours = fillHours
+        monitor.settingsChanged()
     }
 }
 
@@ -190,7 +320,7 @@ private struct SliderRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            .frame(width: 116, alignment: .leading)
+            .frame(width: 150, alignment: .leading)
         }
     }
 }
@@ -202,9 +332,11 @@ private struct ExceptionsPane: View {
     @State private var entries: [String] = []
     @State private var selection: Set<String> = []
     @State private var newEntry = ""
+    @State private var snoozes: [(key: String, until: Date)] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            snoozeSection
             Text("Never alert about these")
                 .font(.headline)
             Text("Matched against whole path components, so \"ffmpeg\" or \"Final Cut Pro.app\" is enough. A build that pegs a core for a minute is normal; these are the things that do it legitimately for hours.")
@@ -242,7 +374,46 @@ private struct ExceptionsPane: View {
             }
         }
         .padding(20)
-        .onAppear { entries = monitor.settings.allowList }
+        .onAppear {
+            entries = monitor.settings.allowList
+            snoozes = monitor.settings.activeSnoozes()
+        }
+    }
+
+    /// Shown only when something is snoozed. A temporary exception nobody can
+    /// see is indistinguishable from the app having quietly stopped working.
+    @ViewBuilder
+    private var snoozeSection: some View {
+        if !snoozes.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Temporarily ignored").font(.headline)
+                ForEach(snoozes, id: \.key) { s in
+                    HStack(spacing: 8) {
+                        Image(systemName: "clock")
+                            .foregroundStyle(.orange.opacity(0.9)).font(.caption)
+                        Text((s.key as NSString).lastPathComponent)
+                            .lineLimit(1).truncationMode(.middle)
+                        Spacer(minLength: 8)
+                        Text(Self.remaining(until: s.until))
+                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        Button("Resume") {
+                            monitor.settings.clearSnooze(key: s.key)
+                            snoozes = monitor.settings.activeSnoozes()
+                        }
+                        .controlSize(.small)
+                    }
+                }
+            }
+            .padding(10)
+            .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    private static func remaining(until: Date) -> String {
+        let secs = max(0, Int(until.timeIntervalSinceNow))
+        if secs < 3600 { return "\(max(1, secs / 60)) min left" }
+        let h = secs / 3600, m = (secs % 3600) / 60
+        return m == 0 ? "\(h)h left" : "\(h)h \(m)m left"
     }
 
     private func add() {
@@ -265,110 +436,3 @@ private struct ExceptionsPane: View {
     }
 }
 
-// MARK: - About
-
-private struct AboutPane: View {
-    @ObservedObject var monitor: Monitor
-    @State private var duty: Double = 0
-    @State private var cpuMs: Double = 0
-
-    private var version: String {
-        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
-        let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
-        return "Version \(v) (\(b))"
-    }
-
-    @ViewBuilder
-    private var updates: some View {
-        if let u = monitor.updates.available {
-            VStack(spacing: 4) {
-                Text("Version \(u.version) is available")
-                    .font(.caption.bold()).foregroundStyle(.orange)
-                Button("Download\u{2026}") { monitor.updates.openDownloadPage() }
-                    .controlSize(.small)
-            }
-        } else {
-            HStack(spacing: 10) {
-                Text(monitor.settings.checkForUpdates ? "Idlewild is up to date" : "Update checks are off")
-                    .font(.caption).foregroundStyle(.secondary)
-                Button("Check Now") { monitor.updates.check(manual: true) }
-                    .controlSize(.small)
-            }
-        }
-    }
-
-    var body: some View {
-        VStack(spacing: 12) {
-            Spacer(minLength: 0)
-
-            if let icon = NSApp.applicationIconImage {
-                Image(nsImage: icon)
-                    .resizable()
-                    .frame(width: 76, height: 76)
-            }
-            Text("Idlewild").font(.title2.bold())
-            Text(version).font(.caption).foregroundStyle(.secondary)
-
-            Text("Notices when a process runs away, works out why, and offers to stop it.")
-                .font(.callout)
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 40)
-                .padding(.top, 2)
-
-            // A watchdog should be accountable to the standard it enforces.
-            GroupBox {
-                HStack(spacing: 0) {
-                    Stat(value: String(format: "%.0f ms", cpuMs), label: "CPU used since launch")
-                    Divider().frame(height: 32)
-                    Stat(value: String(format: "%.4f%%", duty), label: "of one core")
-                }
-                .padding(.vertical, 6)
-            }
-            .padding(.horizontal, 30)
-
-            Text("For comparison, a typical menu bar CPU meter costs about 3.6%.")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-
-            Divider().padding(.vertical, 2)
-
-            updates
-
-            Text("Copyright \u{00A9} 2026 Luca Gibelli")
-                .font(.caption).foregroundStyle(.secondary)
-            Text("Released under the GNU General Public License, version 3 or later. Idlewild comes with absolutely no warranty. You are free to change it and redistribute it under the same licence.")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 24)
-            HStack(spacing: 14) {
-                Link("Licence", destination: URL(string: "https://www.gnu.org/licenses/gpl-3.0.html")!)
-                Link("Source", destination: URL(string: "https://github.com/lgibelli/idlewild")!)
-            }
-            .font(.caption)
-
-            Spacer(minLength: 0)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(20)
-        .onAppear {
-            duty = monitor.ownDutyCycle
-            cpuMs = monitor.ownCPUms
-        }
-    }
-}
-
-private struct Stat: View {
-    let value: String
-    let label: String
-    var body: some View {
-        VStack(spacing: 3) {
-            Text(value).font(.title3.monospacedDigit().weight(.medium))
-            Text(label).font(.caption2).foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-    }
-}

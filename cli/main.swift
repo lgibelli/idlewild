@@ -30,6 +30,17 @@ struct Config {
     var busyInterval  = 10.0    // scan period while a suspect is building
     var leewayFrac    = 0.25    // timer slack, as a fraction of the interval
 
+    // Memory. A process is worth mentioning once it holds this share of
+    // physical RAM: a share rather than an absolute figure, because 6 GB is
+    // fine on a 64 GB Studio and fatal on an 8 GB Air. It is reported when it
+    // keeps growing for the sustain window with no plateau (a leak), or when it
+    // is the largest process while the kernel reports memory pressure.
+    var watchCPU         = true
+    var watchMemory      = true
+    var memoryShare      = 50.0    // percent of physical RAM
+    var memorySustainSecs = 600.0  // the footprint must climb in a line this long
+    var memoryFillHours  = 12.0    // and at that rate fill memory within this
+
     // Processes that are *supposed* to peg a core. Matched against exec path.
     var allowList = [
         "ffmpeg", "clang", "swift-frontend",
@@ -46,6 +57,42 @@ struct Sample {
     let footprint: UInt64     // ri_phys_footprint (what Activity Monitor calls Memory)
     let startAbs: UInt64      // distinguishes a recycled pid from the original
     let wakeups: UInt64       // idle wakeups - the metric that actually drives heat
+}
+
+/// Whole-machine memory facts, one sysctl each. Virtual size is deliberately
+/// absent: on macOS every process maps the shared cache, so even TextEdit
+/// reports hundreds of gigabytes and the number carries no information.
+enum HostMemory {
+    static let physical: UInt64 = {
+        var v: UInt64 = 0
+        var sz = MemoryLayout<UInt64>.size
+        return sysctlbyname("hw.memsize", &v, &sz, nil, 0) == 0 && v > 0 ? v : 8 << 30
+    }()
+
+    /// 1 normal, 2 warning, 4 critical - the kernel's own verdict.
+    static func pressureLevel() -> Int32 {
+        var v: Int32 = 0
+        var sz = MemoryLayout<Int32>.size
+        return sysctlbyname("kern.memorystatus_vm_pressure_level", &v, &sz, nil, 0) == 0 ? v : 0
+    }
+
+    static func swapUsed() -> UInt64 {
+        var sw = xsw_usage()
+        var sz = MemoryLayout<xsw_usage>.size
+        return sysctlbyname("vm.swapusage", &sw, &sz, nil, 0) == 0 ? sw.xsu_used : 0
+    }
+}
+
+func fmtDuration(_ t: TimeInterval) -> String {
+    if !t.isFinite { return "never" }
+    if t < 90 { return "\(Int(t))s" }
+    if t < 5400 { return "\(Int(t / 60)) min" }
+    return String(format: "%.1f hours", t / 3600)
+}
+
+func fmtBytes(_ b: UInt64) -> String {
+    let mb = Double(b) / 1_048_576
+    return mb < 1000 ? String(format: "%.0f MB", mb) : String(format: "%.1f GB", mb / 1024)
 }
 
 /// proc_pid_rusage reports CPU time in MACH ABSOLUTE TIME UNITS, not nanoseconds.
@@ -154,6 +201,54 @@ func isAllowed(path: String, allowList: [String]) -> Bool {
 
 // MARK: - Detector state
 
+struct MemPoint { let t: Double; let bytes: UInt64 }
+
+/// Least-squares line through a footprint history. A leak is a straight line
+/// with positive slope and r² near 1; a staircase (loaded something, stopped)
+/// or a sawtooth (allocate, collect) both fit a line badly.
+struct LeakFit {
+    let bytesPerSecond: Double
+    let r2: Double
+    let span: TimeInterval
+    let grownBytes: Double
+    let count: Int
+    var mbPerMin: Double { bytesPerSecond * 60 / 1_048_576 }
+
+    init?(_ pts: [MemPoint]) {
+        guard pts.count >= 2, let first = pts.first, let last = pts.last else { return nil }
+        let n = Double(pts.count), t0 = first.t, y0 = Double(first.bytes)
+        var sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0, syy = 0.0
+        for p in pts {
+            let x = p.t - t0, y = Double(p.bytes) - y0
+            sx += x; sy += y; sxx += x * x; sxy += x * y; syy += y * y
+        }
+        let vx = sxx - sx * sx / n, vy = syy - sy * sy / n
+        guard vx > 0 else { return nil }
+        let cov = sxy - sx * sy / n
+        bytesPerSecond = cov / vx
+        r2 = vy > 0 ? (cov * cov) / (vx * vy) : 0
+        span = last.t - first.t
+        grownBytes = Double(last.bytes) - Double(first.bytes)
+        count = pts.count
+    }
+
+    /// Each clause removes a class of false positive a plain threshold raises.
+    func isLeak(sustain: TimeInterval, latest: UInt64, peak: UInt64,
+                physical: UInt64, fillHours: Double) -> Bool {
+        guard count >= 6, span >= sustain else { return false }          // enough evidence
+        guard bytesPerSecond > 0, r2 >= 0.85 else { return false }        // a line, going up
+        guard grownBytes >= 32 * 1_048_576,                                // not noise...
+              grownBytes >= Double(latest) * 0.05 else { return false }   // ...relative to its size
+        guard Double(latest) >= Double(peak) * 0.98 else { return false } // still climbing, no plateau
+        return fillsIn(latest: latest, physical: physical) <= fillHours * 3600
+    }
+
+    func fillsIn(latest: UInt64, physical: UInt64) -> TimeInterval {
+        guard bytesPerSecond > 0, physical > latest else { return .infinity }
+        return Double(physical - latest) / bytesPerSecond
+    }
+}
+
 struct Track {
     var startAbs: UInt64
     var lastCPU: UInt64
@@ -161,6 +256,27 @@ struct Track {
     var overSince: Date?        // when it first crossed the threshold
     var footprintAtCross: UInt64
     var alerted = false
+
+    // Memory: a time-decimated footprint history, kept only once the process
+    // is large enough to matter, cleared on a real drop (freeing is not leaking).
+    var mem: [MemPoint] = []
+    var memStoredAt: Double = -.infinity
+    var memPeak: UInt64 = 0
+    var memAlerted = false
+    var pressureAlerted = false
+
+    init(startAbs: UInt64, cpu: UInt64, footprint: UInt64) {
+        self.startAbs = startAbs
+        lastCPU = cpu
+        lastFootprint = footprint
+        footprintAtCross = footprint
+    }
+
+    mutating func clearMemory() {
+        if !mem.isEmpty { mem.removeAll(keepingCapacity: true) }
+        memPeak = 0
+        memAlerted = false
+    }
 }
 
 final class Detector {
@@ -170,6 +286,8 @@ final class Detector {
     private var pathCache: [pid_t: String] = [:]
     private var lastScan = Date()
     private let selfPID = getpid()
+    /// One culprit per pressure episode; see the app's Detector for why.
+    private var pressureNamed: pid_t?
 
     // self-instrumentation
     private(set) var scanCount = 0
@@ -179,9 +297,25 @@ final class Detector {
 
     init(cfg: Config) { self.cfg = cfg }
 
-    var hasActiveSuspect: Bool { tracks.values.contains { $0.overSince != nil } }
+    /// A rising footprint counts as a suspect only once it is large enough to
+    /// matter; something is always growing, and tightening the cadence for all
+    /// of it would spend the budget on nothing.
+    var hasActiveSuspect: Bool {
+        let limit = cfg.watchMemory ? memLimit : UInt64.max
+        return tracks.values.contains { t in
+            if t.overSince != nil { return true }
+            guard t.lastFootprint >= limit, t.mem.count >= 2 else { return false }
+            return t.mem[t.mem.count - 1].bytes > t.mem[t.mem.count - 2].bytes
+        }
+    }
+    static let historyCap = 64
+
+    private var memLimit: UInt64 { UInt64(Double(HostMemory.physical) * cfg.memoryShare / 100) }
+
+    enum Kind { case cpu, memory }
 
     struct Alert {
+        let kind: Kind
         let pid: pid_t
         let name: String
         let path: String
@@ -189,6 +323,11 @@ final class Detector {
         let heldFor: TimeInterval
         let footprintMB: Double
         let footprintGrowthMB: Double
+        var growthMBPerMin: Double = 0
+        var memoryShare: Double = 0
+        var underPressure = false
+        var fillsIn: TimeInterval? = nil
+        var why: String = ""
     }
 
     /// One pass. Returns any process that just crossed from "suspect" to "confirmed".
@@ -204,6 +343,14 @@ final class Detector {
         var sampled = 0
         var listed = 0
 
+        let memLimit = self.memLimit
+        let memGate = memLimit / 4
+        let spacing = min(max(cfg.memorySustainSecs / 8, dt), 60)
+        let tnow = now.timeIntervalSinceReferenceDate
+        let pressure = cfg.watchMemory ? HostMemory.pressureLevel() : 0
+        let underPressure = pressure >= 2
+        var hogs: [(pid: pid_t, footprint: UInt64)] = []
+
         for pid in lister.list() {
             listed += 1
             guard pid > 0, let s = sampleProc(pid) else { continue }
@@ -212,9 +359,7 @@ final class Detector {
 
             guard var t = tracks[pid], t.startAbs == s.startAbs else {
                 // new process, or a recycled pid - start fresh, no reading yet
-                tracks[pid] = Track(startAbs: s.startAbs, lastCPU: s.cpuNanos,
-                                    lastFootprint: s.footprint, overSince: nil,
-                                    footprintAtCross: s.footprint)
+                tracks[pid] = Track(startAbs: s.startAbs, cpu: s.cpuNanos, footprint: s.footprint)
                 continue
             }
 
@@ -223,7 +368,7 @@ final class Detector {
             t.lastCPU = s.cpuNanos
             t.lastFootprint = s.footprint
 
-            if pct >= cfg.cpuThreshold && pid != selfPID {
+            if cfg.watchCPU && pct >= cfg.cpuThreshold && pid != selfPID {
                 if t.overSince == nil {
                     t.overSince = now
                     t.footprintAtCross = s.footprint
@@ -236,6 +381,7 @@ final class Detector {
                     if !isAllowed(path: path, allowList: cfg.allowList) {
                         t.alerted = true
                         alerts.append(Alert(
+                            kind: .cpu,
                             pid: pid, name: displayName(pid, path), path: path,
                             cpuPercent: pct, heldFor: held,
                             footprintMB: Double(s.footprint) / 1_048_576.0,
@@ -248,7 +394,96 @@ final class Detector {
                 t.overSince = nil
                 t.alerted = false
             }
+
+            if cfg.watchMemory && pid != selfPID {
+                if s.footprint < memGate {
+                    if t.memPeak != 0 { t.clearMemory() }
+                } else {
+                    if t.memPeak > 0, Double(s.footprint) < Double(t.memPeak) * 0.9 { t.clearMemory() }
+                    if tnow - t.memStoredAt >= spacing {
+                        t.mem.append(MemPoint(t: tnow, bytes: s.footprint))
+                        if t.mem.count > Self.historyCap { t.mem.removeFirst() }
+                        t.memStoredAt = tnow
+                    }
+                    t.memPeak = max(t.memPeak, s.footprint)
+                }
+                if !underPressure { t.pressureAlerted = false }
+
+                if s.footprint >= memLimit {
+                    if !t.memAlerted, let fit = LeakFit(t.mem),
+                       fit.isLeak(sustain: cfg.memorySustainSecs, latest: s.footprint, peak: t.memPeak,
+                                  physical: HostMemory.physical, fillHours: cfg.memoryFillHours) {
+                        t.memAlerted = true
+                        let path = pathCache[pid] ?? {
+                            let p = execPath(pid); pathCache[pid] = p; return p
+                        }()
+                        if !isAllowed(path: path, allowList: cfg.allowList) {
+                            let fills = fit.fillsIn(latest: s.footprint, physical: HostMemory.physical)
+                            alerts.append(Alert(
+                                kind: .memory,
+                                pid: pid, name: displayName(pid, path), path: path,
+                                cpuPercent: pct, heldFor: fit.span,
+                                footprintMB: Double(s.footprint) / 1_048_576.0,
+                                footprintGrowthMB: fit.grownBytes / 1_048_576.0,
+                                growthMBPerMin: fit.mbPerMin,
+                                memoryShare: Double(s.footprint) / Double(HostMemory.physical),
+                                underPressure: underPressure,
+                                fillsIn: fills,
+                                why: "memory climbing in a straight line for \(fmtDuration(fit.span)), "
+                                   + "usually a leak; at this rate it fills memory in \(fmtDuration(fills))"))
+                        }
+                    }
+                    if underPressure && !t.pressureAlerted && !t.memAlerted {
+                        hogs.append((pid, s.footprint))
+                    }
+                }
+            }
             tracks[pid] = t
+        }
+
+        // Under pressure, name one culprit: the largest process that is not
+        // allowlisted. Naming every large process is a list, not an alarm.
+        if !underPressure || (pressureNamed.map { !seen.contains($0) } ?? false) {
+            pressureNamed = nil
+        }
+        if underPressure && pressureNamed == nil {
+            for h in hogs.sorted(by: { $0.footprint > $1.footprint }) {
+                let path = pathCache[h.pid] ?? {
+                    let p = execPath(h.pid); pathCache[h.pid] = p; return p
+                }()
+                guard !isAllowed(path: path, allowList: cfg.allowList) else { continue }
+                tracks[h.pid]?.pressureAlerted = true
+                tracks[h.pid]?.memAlerted = true
+                pressureNamed = h.pid
+                let track = tracks[h.pid]
+                let fit = track.flatMap { LeakFit($0.mem) }
+                let growing = (fit?.bytesPerSecond ?? 0) > 0 && (fit?.r2 ?? 0) >= 0.85
+                let leak = fit?.isLeak(sustain: cfg.memorySustainSecs, latest: h.footprint,
+                                       peak: track?.memPeak ?? 0, physical: HostMemory.physical,
+                                       fillHours: cfg.memoryFillHours) ?? false
+                let fills = growing ? fit!.fillsIn(latest: h.footprint, physical: HostMemory.physical) : nil
+                let why: String
+                if leak {
+                    why = "memory climbing in a straight line for \(fmtDuration(fit!.span)), usually a leak, "
+                        + "and the machine is already low on memory; at this rate it fills memory in \(fmtDuration(fills!))"
+                } else if growing {
+                    why = "the machine is low on memory, and this process is the largest and still growing"
+                } else {
+                    why = "the machine is low on memory, and this process is the largest"
+                }
+                alerts.append(Alert(
+                    kind: .memory,
+                    pid: h.pid, name: displayName(h.pid, path), path: path,
+                    cpuPercent: 0, heldFor: fit?.span ?? 0,
+                    footprintMB: Double(h.footprint) / 1_048_576.0,
+                    footprintGrowthMB: (fit?.grownBytes ?? 0) / 1_048_576.0,
+                    growthMBPerMin: growing ? fit!.mbPerMin : 0,
+                    memoryShare: Double(h.footprint) / Double(HostMemory.physical),
+                    underPressure: true,
+                    fillsIn: fills,
+                    why: why))
+                break
+            }
         }
 
         // reap exited processes so the dictionaries do not grow without bound
@@ -438,17 +673,35 @@ func cmdWatch(cfg: Config) {
 
     timer.setEventHandler {
         for a in d.scan() {
-            let why = diagnose(a.pid, a.name)
-            print("""
+            switch a.kind {
+            case .cpu:
+                let why = diagnose(a.pid, a.name)
+                print("""
 
-            [\(iso.string(from: Date()))]  RUNAWAY PROCESS
-              \(a.name)  (pid \(a.pid))
-              \(String(format: "%.0f%%", a.cpuPercent)) of one core, held for \(a.heldFor < 90 ? "\(Int(a.heldFor))s" : "\(Int(a.heldFor / 60)) min")
-              memory \(String(format: "%.0f MB", a.footprintMB)) \
-            (\(String(format: "%+.0f MB", a.footprintGrowthMB)) since it started spinning)
-              likely cause: \(why)
-              to stop it:   kill \(a.pid)
-            """)
+                [\(iso.string(from: Date()))]  RUNAWAY PROCESS
+                  \(a.name)  (pid \(a.pid))
+                  \(String(format: "%.0f%%", a.cpuPercent)) of one core, held for \(a.heldFor < 90 ? "\(Int(a.heldFor))s" : "\(Int(a.heldFor / 60)) min")
+                  memory \(String(format: "%.0f MB", a.footprintMB)) \
+                (\(String(format: "%+.0f MB", a.footprintGrowthMB)) since it started spinning)
+                  likely cause: \(why)
+                  to stop it:   kill \(a.pid)
+                """)
+            case .memory:
+                // No stack sample: it says nothing about a leak, and the
+                // evidence is already in the numbers.
+                let growth = a.growthMBPerMin > 0
+                    ? String(format: "growing %.0f MB/min for %@", a.growthMBPerMin, fmtDuration(a.heldFor))
+                    : "not growing"
+                let swap = a.underPressure ? "\n  swap in use:  \(fmtBytes(HostMemory.swapUsed()))" : ""
+                print("""
+
+                [\(iso.string(from: Date()))]  MEMORY HOG
+                  \(a.name)  (pid \(a.pid))
+                  \(fmtBytes(UInt64(a.footprintMB * 1_048_576))), \(String(format: "%.0f%%", a.memoryShare * 100)) of physical memory, \(growth)\(swap)
+                  likely cause: \(a.why)
+                  to stop it:   kill \(a.pid)
+                """)
+            }
             fflush(stdout)
         }
         // Adaptive cadence: tighten only while something is actually building.
@@ -458,8 +711,14 @@ func cmdWatch(cfg: Config) {
 
     reschedule(interval: currentInterval)
     timer.resume()
-    print("idlewild watching. threshold \(Int(cfg.cpuThreshold))% of a core, "
-          + "sustained \(Int(cfg.sustainSecs / 60)) min. calm scan every \(Int(cfg.calmInterval)) s.")
+    let mem = cfg.watchMemory
+        ? "memory above \(Int(cfg.memoryShare))% (\(fmtBytes(UInt64(Double(HostMemory.physical) * cfg.memoryShare / 100)))) climbing for \(Int(cfg.memorySustainSecs / 60)) min. "
+        : "memory not watched. "
+    let cpu = cfg.watchCPU
+        ? "threshold \(Int(cfg.cpuThreshold))% of a core, sustained \(Int(cfg.sustainSecs / 60)) min. "
+        : "CPU not watched. "
+    print("idlewild watching. " + cpu + mem
+          + "calm scan every \(Int(cfg.calmInterval)) s.")
     fflush(stdout)
     dispatchMain()
 }
@@ -475,7 +734,12 @@ while i < args.count {
     switch args[i] {
     case "--threshold": if i+1 < args.count { cfg.cpuThreshold = Double(args[i+1]) ?? cfg.cpuThreshold; i += 1 }
     case "--sustain":   if i+1 < args.count { cfg.sustainSecs = (Double(args[i+1]) ?? 5) * 60; i += 1 }
+    case "--memory-sustain": if i+1 < args.count { cfg.memorySustainSecs = (Double(args[i+1]) ?? 10) * 60; i += 1 }
+    case "--memory-fill":    if i+1 < args.count { cfg.memoryFillHours = Double(args[i+1]) ?? cfg.memoryFillHours; i += 1 }
     case "--interval":  if i+1 < args.count { cfg.calmInterval = Double(args[i+1]) ?? cfg.calmInterval; i += 1 }
+    case "--memory-share": if i+1 < args.count { cfg.memoryShare = Double(args[i+1]) ?? cfg.memoryShare; i += 1 }
+    case "--no-memory": cfg.watchMemory = false
+    case "--no-cpu":    cfg.watchCPU = false
     default: break
     }
     i += 1
@@ -488,4 +752,6 @@ case "cost":     cmdCost(pidArg: args.count > 1 ? pid_t(args[1]) : nil)
 case "watch":    cmdWatch(cfg: cfg)
 default:
     print("usage: idlewild [watch|scan|selftest|cost] [--threshold PCT] [--sustain MIN] [--interval SEC]")
+    print("                [--memory-share PCT] [--memory-sustain MIN] [--memory-fill HOURS]")
+    print("                [--no-memory] [--no-cpu]")
 }

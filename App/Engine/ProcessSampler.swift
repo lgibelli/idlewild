@@ -42,6 +42,9 @@ struct ProcSample {
     let qos: QoSMix
     let instructions: UInt64
     let cycles: UInt64
+    /// Cumulative page-ins. A rising rate means the process is actively being
+    /// paged back in, i.e. the machine is swapping on its behalf.
+    let pageins: UInt64
 
     /// High IPC alongside pinned CPU means a tight in-cache loop - the signature
     /// of a spin. Low IPC means memory stalls, more often genuine work.
@@ -68,7 +71,52 @@ func sampleProc(_ pid: pid_t) -> ProcSample? {
                       startAbs: i.ri_proc_start_abstime,
                       qos: qos,
                       instructions: i.ri_instructions,
-                      cycles: i.ri_cycles)
+                      cycles: i.ri_cycles,
+                      pageins: i.ri_pageins)
+}
+
+/// Whole-machine memory facts. Physical size never changes; the other two are
+/// one sysctl each, cheaper than a single proc_pid_rusage call, and readable
+/// without privilege.
+///
+/// Virtual size is deliberately absent. On macOS every process maps the shared
+/// cache and reserves address space, so even TextEdit reports hundreds of
+/// gigabytes; the number carries no information. Physical footprint - what
+/// Activity Monitor calls "Memory" - and system-wide pressure are what matter.
+enum HostMemory {
+    static let physical: UInt64 = {
+        var v: UInt64 = 0
+        var sz = MemoryLayout<UInt64>.size
+        return sysctlbyname("hw.memsize", &v, &sz, nil, 0) == 0 && v > 0 ? v : 8 << 30
+    }()
+
+    enum Pressure: Int32, Comparable {
+        case unknown = 0, normal = 1, warning = 2, critical = 4
+        static func < (a: Pressure, b: Pressure) -> Bool { a.rawValue < b.rawValue }
+        var isElevated: Bool { self >= .warning }
+    }
+
+    /// The kernel's own verdict, the same one that drives the memory pressure
+    /// dispatch source and Activity Monitor's pressure graph.
+    static func pressure() -> Pressure {
+        var v: Int32 = 0
+        var sz = MemoryLayout<Int32>.size
+        guard sysctlbyname("kern.memorystatus_vm_pressure_level", &v, &sz, nil, 0) == 0 else {
+            return .unknown
+        }
+        return Pressure(rawValue: v) ?? .unknown
+    }
+
+    static func swapUsed() -> UInt64 {
+        var sw = xsw_usage()
+        var sz = MemoryLayout<xsw_usage>.size
+        return sysctlbyname("vm.swapusage", &sw, &sz, nil, 0) == 0 ? sw.xsu_used : 0
+    }
+}
+
+func formatBytes(_ b: UInt64) -> String {
+    let mb = Double(b) / 1_048_576
+    return mb < 1000 ? String(format: "%.0f MB", mb) : String(format: "%.1f GB", mb / 1024)
 }
 
 /// Reuses its buffer so a scan allocates nothing on the hot path.

@@ -16,7 +16,11 @@ struct IdlewildApp: App {
             // The icon changes shape only when state changes - never on a timer.
             // A menu bar item that repaints on a schedule is the exact failure
             // this app exists to catch.
-            Image(systemName: iconName)
+            if monitor.colouredIcon && !monitor.incidents.isEmpty {
+                Image(nsImage: MenuBarIcon.colouredFlame)
+            } else {
+                Image(systemName: iconName)
+            }
         }
         // .menu gives a real NSMenu - standard highlighting, keyboard
         // navigation and metrics - instead of a custom floating panel.
@@ -25,6 +29,12 @@ struct IdlewildApp: App {
         Settings {
             SettingsView(monitor: monitor)
         }
+
+        Window("About Idlewild", id: "about") {
+            AboutView(monitor: monitor)
+        }
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
     }
 
     private var iconName: String {
@@ -44,6 +54,19 @@ enum MenuBarIcon {
         "waveform.path",
         "speedometer",                        // long-standing fallback
     ])
+
+    /// An orange flame, for people who want the alarm to look like one. A menu
+    /// bar label is drawn as a template image unless told otherwise, which is
+    /// why this is an NSImage with the template flag cleared rather than a
+    /// SwiftUI foreground style that the menu bar would ignore.
+    static let colouredFlame: NSImage = {
+        let base = NSImage(systemSymbolName: "flame.fill", accessibilityDescription: "Runaway process")
+            ?? NSImage()
+        let cfg = NSImage.SymbolConfiguration(paletteColors: [.systemOrange])
+        let img = base.withSymbolConfiguration(cfg) ?? base
+        img.isTemplate = false
+        return img
+    }()
 
     private static func firstAvailable(_ names: [String]) -> String {
         for n in names where NSImage(systemSymbolName: n, accessibilityDescription: nil) != nil {
@@ -83,9 +106,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             else { return }
 
             switch response.actionIdentifier {
-            case Notifier.Action.kill.rawValue:    monitor.kill(incident)
-            case Notifier.Action.suspend.rawValue: monitor.suspend(incident)
-            case Notifier.Action.ignore.rawValue:  monitor.dismiss(incident)
+            case Notifier.Action.kill.rawValue:        monitor.kill(incident)
+            case Notifier.Action.suspend.rawValue:     monitor.suspend(incident)
+            case Notifier.Action.ignore.rawValue:      monitor.dismiss(incident)
+            case Notifier.Action.snoozeHour.rawValue:  monitor.snooze(incident, for: 3600)
+            case Notifier.Action.snoozeToday.rawValue: monitor.snoozeUntilTomorrow(incident)
+            case Notifier.Action.allowAlways.rawValue: monitor.alwaysAllow(incident)
             default: break   // tapping the body just opens the menu
             }
         }
