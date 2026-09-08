@@ -3,42 +3,13 @@
 A macOS menu bar app that notices when a process has been running away with a
 CPU core or with the machine's memory, works out *why*, and offers to stop it.
 
-Activity Monitor is a microscope, not a smoke alarm — you have to already
-suspect something before you go look. Idlewild is the smoke alarm.
+Activity Monitor tells you what is busy once you go and look. Idlewild watches
+for you and says something when a process has been holding a core, or growing,
+for long enough that it is a bug rather than normal work.
 
-```
- 🔥  ← the menu bar icon, once something is wrong
-
- ┌─────────────────────────────────────────────┐
- │ 1 process running away                      │
- ├─────────────────────────────────────────────┤
- │ Safari web page — 104% for 9.8 hours     ▸  │──┐
- ├─────────────────────────────────────────────┤  │
- │ Pause Monitoring                            │  │
- │ Settings…                                ⌘, │  │
- ├─────────────────────────────────────────────┤  │
- │ Quit Idlewild                            ⌘Q │  │
- └─────────────────────────────────────────────┘  │
-                                                  ▼
-                    ┌──────────────────────────────────────────┐
-                    │ Force Quit                               │
-                    │ Pause It                                 │
-                    ├──────────────────────────────────────────┤
-                    │ Ignore This Time                         │
-                    │ Always Allow com.apple.WebKit.WebContent │
-                    ├──────────────────────────────────────────┤
-                    │ A web page stuck throwing JavaScript     │
-                    │ errors in a loop                         │
-                    │ On performance cores — this is what      │
-                    │ heats the machine                        │
-                    │ Memory growing 11 MB/min                 │
-                    │ pid 84183                                │
-                    └──────────────────────────────────────────┘
-```
-
-The icon is an ECG trace when all is well and a flame when it is not. It is a
-real `NSMenu`, not a custom panel, and it shows no live statistics — see the
-note on cost below.
+The menu bar icon is an ECG trace while everything is quiet, and a flame once
+something is detected. Each detected process gets a submenu with the cause and
+the actions worth taking.
 
 It was written after a Safari tab spent nine and a half hours pegging a core on
 a fanless MacBook Air, entirely unnoticed.
@@ -85,18 +56,6 @@ excluded — lifetime averages are dominated by AppKit initialisation and flatte
 the result badly. The app figure predates memory watching; the CLI self-test
 puts its per-scan cost about 10% higher, which is the one extra `sysctl` per
 scan for the pressure level and the arithmetic on data it already had.
-
-### Measure on a quiet machine
-
-Measurements taken while building, installing or relaunching apps are worthless.
-Every install broadcasts LaunchServices and workspace notifications that each
-running app's run loop must service, so the thing being measured absorbs the
-cost of the measuring. Two consecutive runs here reported 1449 and 3343 ms/hour
-— and the *second*, with an optimisation reverted, was worse than the first.
-
-That contradiction is the signal. When reverting a change appears to make things
-worse, the experiment is broken before the code is. On a quiet machine the same
-build measures 217 ms/hour.
 
 ## False positives are the whole product
 
@@ -161,68 +120,6 @@ Allowlist entries match whole path components, never raw substrings. This is not
 fussiness: the first version matched substrings and shipped `"ld"` for the
 linker, which silently allowlisted everything under `/var/folders/` — because
 "folders" contains "ld". The end-to-end test caught it.
-
-## Updates
-
-Idlewild checks `https://www.salamacchine.it/apps/idlewild/latest.json` once a
-day and, when a newer version exists, adds a download item to the menu. It never
-downloads or installs anything by itself.
-
-That restraint is the point. An updater that fetches and executes code turns its
-feed into a way to run arbitrary software on every user's machine, which is why
-Sparkle requires the feed to be signed with an EdDSA key and the public half
-embedded in the app. Getting that wrong (an empty `SUPublicEDKey`, say) silently
-disables the check while everything still appears to work. Idlewild reports the
-version and opens the download page, so macOS applies Gatekeeper to whatever the
-user chooses to run, exactly as it would for a fresh download.
-
-The check sends an HTTP request to salamacchine.it, which necessarily reveals the
-user's IP address and the app version in the User-Agent. Settings has a toggle to
-turn it off, and the wording there says what it contacts.
-
-Feed format:
-
-```json
-{
-  "version": "1.0.1",
-  "url": "https://www.salamacchine.it/apps/idlewild/",
-  "notes": "What changed.",
-  "minimumSystemVersion": "14.0"
-}
-```
-
-The proposed URL is checked before anything is opened: it must be `https` on
-salamacchine.it or github.com, so a mistyped or tampered feed cannot send anyone
-somewhere unexpected. Version comparison is numeric per component, so 1.10.0
-correctly sorts above 1.9.0.
-
-## Verifying a download
-
-Every release is built, signed and notarized by GitHub Actions, and carries a
-SLSA build-provenance attestation recorded in Sigstore's public transparency
-log. That binds the exact bytes you downloaded to the commit and workflow that
-produced them:
-
-```sh
-gh attestation verify Idlewild-1.0.0.dmg --repo lgibelli/idlewild
-```
-
-The workflow itself is in `.github/workflows/release-signed.yml`, so you can read
-what it did rather than take anyone's word for it.
-
-macOS checks the rest for you before the app ever opens, but you can check by
-hand too:
-
-```sh
-spctl -a -vvv -t execute /Applications/Idlewild.app   # notarized and accepted
-xcrun stapler validate /Applications/Idlewild.app     # ticket stapled: works offline
-codesign -dv --verbose=4 /Applications/Idlewild.app   # the signing identity
-```
-
-What the attestation proves is provenance, not reproducibility: it shows the
-binary came from this source, not that rebuilding this source yields identical
-bytes. Signing embeds timestamps, so a byte-identical rebuild is not achievable
-on macOS without considerable effort.
 
 ## Not on the Mac App Store
 
