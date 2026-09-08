@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Luca Gibelli
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Foundation
 import Darwin
 
@@ -106,7 +109,7 @@ func procName(_ pid: pid_t) -> String {
 }
 
 /// Basenames are usually right, but some binaries live in versioned directories
-/// (".../2.1.263/claude"), where the basename is a version string. Fall back.
+/// (".../2.1.263/toolname"), where the basename is a version string. Fall back.
 func displayName(_ pid: pid_t, _ path: String) -> String {
     let base = (path as NSString).lastPathComponent
     let looksLikeVersion = !base.isEmpty && base.allSatisfy { $0.isNumber || $0 == "." }

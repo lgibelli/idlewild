@@ -1,4 +1,7 @@
 #!/bin/bash
+#
+# SPDX-FileCopyrightText: 2026 Luca Gibelli
+# SPDX-License-Identifier: GPL-3.0-or-later
 # End-to-end test against a process we control, rather than whatever happens to
 # be misbehaving on the machine. Spawns a deliberate CPU burner, asserts that
 # Idlewild finds it, classifies it, and leaves everything else alone.

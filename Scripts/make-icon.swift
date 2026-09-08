@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Luca Gibelli
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import AppKit
 
 // Generates Idlewild.icns. The mark is the same ECG trace the menu bar uses

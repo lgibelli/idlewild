@@ -1,4 +1,7 @@
 #!/bin/bash
+#
+# SPDX-FileCopyrightText: 2026 Luca Gibelli
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Reproduces the App Sandbox findings in docs/APP-STORE.md.
 # Builds one probe binary and runs it twice: unsandboxed, then inside a real
 # signed .app bundle carrying the sandbox entitlement.

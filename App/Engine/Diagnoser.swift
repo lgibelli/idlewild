@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Luca Gibelli
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Foundation
 
 /// Turns a stack sample into a sentence a human can act on.

@@ -7,7 +7,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/nervous/devel/idlewild/idlewild</string>
+        <string>__BIN__</string>
         <string>watch</string>
     </array>
 
@@ -22,7 +22,7 @@
     <key>LowPriorityBackgroundIO</key> <true/>
     <key>Nice</key>              <integer>10</integer>
 
-    <key>StandardOutPath</key>   <string>/Users/nervous/Library/Logs/idlewild.log</string>
-    <key>StandardErrorPath</key> <string>/Users/nervous/Library/Logs/idlewild.log</string>
+    <key>StandardOutPath</key>   <string>__HOME__/Library/Logs/idlewild.log</string>
+    <key>StandardErrorPath</key> <string>__HOME__/Library/Logs/idlewild.log</string>
 </dict>
 </plist>

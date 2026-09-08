@@ -1,5 +1,8 @@
 #!/bin/bash
 #
+# SPDX-FileCopyrightText: 2026 Luca Gibelli
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
 # notarize.sh — build, sign, notarize, staple and verify Idlewild for
 # Developer ID distribution (outside the Mac App Store).
 #

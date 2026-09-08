@@ -1,5 +1,8 @@
 #!/bin/bash
 #
+# SPDX-FileCopyrightText: 2026 Luca Gibelli
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
 # make-dmg.sh — package the notarized app into a distributable DMG.
 #
 # Run after Scripts/notarize.sh. The DMG is signed and notarized in its own

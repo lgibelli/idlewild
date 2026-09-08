@@ -1,5 +1,8 @@
 #!/bin/bash
 #
+# SPDX-FileCopyrightText: 2026 Luca Gibelli
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
 # build-common.sh — shared configuration and helpers for the Idlewild build
 # and release scripts. Source this file, don't run it.
 #
