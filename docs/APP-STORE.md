@@ -1,8 +1,7 @@
 # Why Idlewild is not on the Mac App Store
 
 Short version: the App Sandbox is mandatory for App Store distribution, and it
-blocks every operation this app is built on. This is not a limitation we can
-engineer around — there is no entitlement Apple grants App Store apps that lifts
+blocks every operation this app is built on. There is no way to engineer around it — there is no entitlement Apple grants App Store apps that lifts
 it.
 
 ## The test

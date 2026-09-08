@@ -57,7 +57,7 @@ before the right one. A twenty-line app that does nothing but call
 | a Focus mode | parsed `DoNotDisturb/DB/Assertions.json` | zero active assertions |
 | display mirroring / sleep DND | `system_profiler SPDisplaysDataType` | `Mirror: Off` |
 
-The lesson: ask the daemon rather than reasoning about it. `log stream
+The lesson: ask the daemon. `log stream
 --predicate 'process == "usernoted"'` produced the `-43` in one shot, after an
 hour of hypotheses produced nothing.
 
@@ -90,7 +90,7 @@ keyed to that identity, so they cannot persist: the app may never appear in
 Notification Center settings, and `UNUserNotificationCenter` may report
 authorization as not granted no matter how many times you accept the prompt.
 
-This is not a bug in Idlewild. Signing with a Developer ID certificate produces
+Signing with a Developer ID certificate produces
 a stable requirement based on identifier and team ID:
 
 ```
@@ -107,7 +107,7 @@ cp -R build/Idlewild.app /Applications/
 open /Applications/Idlewild.app
 ```
 
-Verify what actually happened rather than guessing from the outside:
+Verify what actually happened:
 
 ```sh
 log stream --predicate 'subsystem == "it.salamacchine.idlewild"'

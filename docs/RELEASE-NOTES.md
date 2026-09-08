@@ -39,11 +39,11 @@ gigabytes; the number carries no information.
 Settings is now four panes: **General** (cadence, notifications, login item,
 updates, icon colour), **CPU** and **Memory** (a switch for each, both on by
 default, and their thresholds), and **Exceptions**. About moved out of
-Settings into the menu, since it is not a setting.
+Settings into the menu, where the action belongs.
 
 ## Also
 
-- **Colour the flame** (General): an orange flame instead of the monochrome one
+- **Colour the flame** (General): an orange flame in place of the monochrome one
   when something is running away. Off by default, since most people keep the
   menu bar monochrome.
 - The pid in an incident's submenu was formatted with the locale's grouping
@@ -60,8 +60,8 @@ Settings into the menu, since it is not a setting.
 A macOS menu bar app that notices when a process has been running away with a
 CPU core, works out *why*, and offers to stop it.
 
-Activity Monitor is a microscope, not a smoke alarm — you have to already suspect
-something before you go look. Idlewild is the smoke alarm.
+Activity Monitor tells you what is busy once you go and look. Idlewild watches
+for you and speaks up on its own.
 
 ## What it does
 
@@ -82,7 +82,7 @@ Then it offers three things:
 
 - **Force Quit** — `SIGKILL`.
 - **Pause It** — `SIGSTOP`. Stops the burn without losing the process's state, so
-  a stuck browser tab can be resumed rather than lost.
+  a stuck browser tab can be resumed.
 - **Ignore** / **Always Allow** — dismiss once, or add it to the allowlist.
 
 ## Cost
@@ -124,14 +124,13 @@ Turn on **Launch at login** in Settings so it survives a reboot.
 
 It cannot be. Under the App Sandbox, `proc_listpids`, `proc_pid_rusage` and
 `kill()` all return EPERM — the app can neither find, measure, nor stop a runaway
-process, and no App Store entitlement lifts that. This was tested rather than
-assumed; `Scripts/sandbox-probe.sh` reproduces it on any Mac.
+process, and no App Store entitlement lifts that. This was tested; `Scripts/sandbox-probe.sh` reproduces it on any Mac.
 
 ## Known issues
 
 - If notifications never prompt and the app does not appear in
   System Settings → Notifications, stale LaunchServices registrations are the
   likely cause. See `docs/DEVELOPMENT.md` for the fix.
-- Browser tabs are reported as "Safari web page" rather than by page title.
+- Browser tabs are reported as "Safari web page" without the page title.
   Getting the tab title requires private API; Activity Monitor uses it, we do
   not. Force-quitting the process makes Safari name the tab in its reload notice.

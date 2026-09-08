@@ -5,7 +5,7 @@ CPU core or with the machine's memory, works out *why*, and offers to stop it.
 
 Activity Monitor tells you what is busy once you go and look. Idlewild watches
 for you and says something when a process has been holding a core, or growing,
-for long enough that it is a bug rather than normal work.
+for long enough to be a bug.
 
 The menu bar icon is an ECG trace while everything is quiet, and a flame once
 something is detected. Each detected process gets a submenu with the cause and
@@ -42,8 +42,8 @@ process that is not on the allowlist, whether or not it is growing.
 
 **A monitor must never become the thing it hunts.**
 
-Budget: under 1 second of CPU time per hour, measured rather than assumed, and
-shown to you in the app's own About panel.
+Budget: under 1 second of CPU time per hour. The figure below is measured, and
+the app shows its own consumption in the About panel so you can check it.
 
 | | CPU per hour | % of one core |
 |---|---|---|
@@ -67,11 +67,12 @@ keeps it quiet:
 - **Sustain window** — 100% for 30 s is a build; for 9 hours it is a bug. This
   is the single most important setting.
 - **Idle-thread guard** — a stack dominated by `__psynch_cvwait` means threads
-  are parked, so Idlewild says so instead of accusing.
+  are parked, so Idlewild says the CPU time may be elsewhere and leaves that
+  process alone.
 - **Memory growth** — RSS climbing steadily while CPU is pinned is strong
-  evidence of a runaway loop rather than honest work.
+  strong evidence of a runaway loop.
 - **Pause It** as an alternative to Force Quit — `SIGSTOP` stops the burn without
-  losing the process's state, so a stuck tab can be resumed rather than lost.
+  losing the process's state, so a stuck tab can be resumed.
 
 For memory the false-positive problem is worse, because Xcode, Docker's VM,
 Lightroom, a virtual machine, or a browser with eighty tabs are all
@@ -114,7 +115,7 @@ Virtual size is deliberately ignored. On macOS every process maps the shared
 cache and reserves address space, so even TextEdit reports hundreds of
 gigabytes; the number carries no information. File descriptors are not
 monitored either: a process that leaks them breaks itself and nothing else,
-which is a job for a debugger rather than a smoke alarm.
+which is a job for a debugger.
 
 Allowlist entries match whole path components, never raw substrings. This is not
 fussiness: the first version matched substrings and shipped `"ld"` for the
@@ -127,7 +128,7 @@ It cannot be. Under the App Sandbox, `proc_listpids`, `proc_pid_rusage` and
 `kill()` all return EPERM — the app can neither find, measure, nor stop a
 runaway process, and no App Store entitlement lifts that.
 
-This was tested, not assumed: see [docs/APP-STORE.md](docs/APP-STORE.md), and
+This was tested: see [docs/APP-STORE.md](docs/APP-STORE.md), and
 reproduce it yourself with `./Scripts/sandbox-probe.sh`.
 
 Idlewild ships the way every comparable tool does — App Tamer, iStat Menus,
