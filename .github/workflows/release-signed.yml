@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: 2026 Luca Gibelli
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: Signed release (DMG)
+
+# Builds, signs, notarizes and publishes the Idlewild disk image, and attaches a
+# SLSA build-provenance attestation so anyone can verify that the binary they
+# downloaded came from this repository and this commit:
+#
+#   gh attestation verify Idlewild-1.0.0.dmg --repo lgibelli/idlewild
+#
+# Triggers only on a push to a release/** branch — which a fork cannot create —
+# or manually. This job holds the Developer ID signing key, so it must never be
+# reachable from pull_request or pull_request_target.
+#
+# Release flow:
+#   1. Bump CFBundleShortVersionString in App/Resources/Info.plist
+#   2. Push a release/<version> branch, e.g. release/1.0.1
+
+on:
+  push:
+    branches: ["release/**"]
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: "Release notes"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  id-token: write # Sigstore signing for the provenance attestation
+  attestations: write
+
+jobs:
+  release:
+    runs-on: macos-15 # Apple Silicon; the app is arm64-only by design
+    environment: release # add required reviewers in Settings → Environments
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Import the signing identity into a throwaway keychain
+        env:
+          CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KCPW="$(openssl rand -base64 24)"
+          echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KCPW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KCPW" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPW" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed s/\"//g)
+          security default-keychain -s "$KEYCHAIN"
+          rm "$RUNNER_TEMP/cert.p12"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+      - name: Write the notary API key
+        env:
+          APPLE_API_KEY_B64: ${{ secrets.APPLE_API_KEY_B64 }}
+        run: printf '%s' "$APPLE_API_KEY_B64" | base64 --decode > "$RUNNER_TEMP/notary-key.p8"
+
+      - name: Build, sign, notarize and staple
+        env:
+          TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          CODESIGN_IDENTITY: ${{ vars.MACOS_SIGNING_IDENTITY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/notary-key.p8
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: ./Scripts/notarize.sh
+
+      - name: Package the DMG
+        env:
+          TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          CODESIGN_IDENTITY: ${{ vars.MACOS_SIGNING_IDENTITY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/notary-key.p8
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: ./Scripts/make-dmg.sh
+
+      - name: Run the end-to-end test against a real CPU burner
+        run: ./Scripts/e2e-test.sh
+
+      - name: Resolve artifact paths
+        id: artifacts
+        run: |
+          set -euo pipefail
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" App/Resources/Info.plist)
+          DMG="build/Idlewild-$VERSION.dmg"
+          [ -f "$DMG" ] || { echo "::error::DMG not found at $DMG"; exit 1; }
+          # Stable, versionless copy so a website can link to
+          # /releases/latest/download/Idlewild-latest.dmg permanently.
+          cp "$DMG" "build/Idlewild-latest.dmg"
+          {
+            echo "version=$VERSION"
+            echo "tag=v$VERSION"
+            echo "dmg=$DMG"
+            echo "latest=build/Idlewild-latest.dmg"
+          } >> "$GITHUB_OUTPUT"
+
+      # Records a signed statement in Sigstore's public transparency log binding
+      # these exact bytes to this workflow, repository and commit.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            ${{ steps.artifacts.outputs.dmg }}
+            ${{ steps.artifacts.outputs.latest }}
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.artifacts.outputs.tag }}
+          VERSION: ${{ steps.artifacts.outputs.version }}
+          DMG: ${{ steps.artifacts.outputs.dmg }}
+          LATEST: ${{ steps.artifacts.outputs.latest }}
+          # Passed via env, never interpolated into the shell: a crafted value
+          # could otherwise inject commands into this secret-bearing job.
+          NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          BODY="${NOTES:-Idlewild $VERSION}"
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" --repo "$REPO" --clobber "$DMG" "$LATEST"
+          else
+            gh release create "$TAG" --repo "$REPO" \
+              --title "Idlewild $VERSION" --notes "$BODY" \
+              --target "$GITHUB_SHA" "$DMG" "$LATEST"
+          fi
+          echo ">> published: https://github.com/$REPO/releases/tag/$TAG"
+          echo ">> verify with: gh attestation verify $(basename "$DMG") --repo $REPO"

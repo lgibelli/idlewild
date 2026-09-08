@@ -108,6 +108,34 @@ fussiness: the first version matched substrings and shipped `"ld"` for the
 linker, which silently allowlisted everything under `/var/folders/` — because
 "folders" contains "ld". The end-to-end test caught it.
 
+## Verifying a download
+
+Every release is built, signed and notarized by GitHub Actions, and carries a
+SLSA build-provenance attestation recorded in Sigstore's public transparency
+log. That binds the exact bytes you downloaded to the commit and workflow that
+produced them:
+
+```sh
+gh attestation verify Idlewild-1.0.0.dmg --repo lgibelli/idlewild
+```
+
+The workflow itself is in `.github/workflows/release-signed.yml`, so you can read
+what it did rather than take anyone's word for it.
+
+macOS checks the rest for you before the app ever opens, but you can check by
+hand too:
+
+```sh
+spctl -a -vvv -t execute /Applications/Idlewild.app   # notarized and accepted
+xcrun stapler validate /Applications/Idlewild.app     # ticket stapled: works offline
+codesign -dv --verbose=4 /Applications/Idlewild.app   # the signing identity
+```
+
+What the attestation proves is provenance, not reproducibility: it shows the
+binary came from this source, not that rebuilding this source yields identical
+bytes. Signing embeds timestamps, so a byte-identical rebuild is not achievable
+on macOS without considerable effort.
+
 ## Not on the Mac App Store
 
 It cannot be. Under the App Sandbox, `proc_listpids`, `proc_pid_rusage` and
