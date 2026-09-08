@@ -143,3 +143,48 @@ short run; a 90-second sample reported 16 s/hour where the true steady state was
 `./Scripts/e2e-test.sh` spawns a controlled CPU burner and asserts that Idlewild
 finds that specific process — never just "some runaway", since the machine may
 have genuine ones of its own.
+
+## Shell traps in the release scripts
+
+Two bugs of the same family bit this pipeline, both turning a *successful*
+operation into a silent failure. Worth knowing before editing the scripts.
+
+**`pipefail` + `grep -q`.** `grep -q` exits the moment it matches, the upstream
+command takes SIGPIPE and returns non-zero, and `set -o pipefail` propagates
+that. The hardened-runtime check therefore failed *precisely when it passed*.
+Capture output first, then test it:
+
+```sh
+CS_FLAGS=$(codesign -d --verbose=2 "$APP" 2>&1 | grep -o 'flags=0x[0-9a-f]*([^)]*)' || true)
+case "$CS_FLAGS" in *runtime*) ;; *) die "..." ;; esac
+```
+
+**`set -e` and the tail of an `&&` chain.** A failing command at the *end* of an
+`&&` chain is not exempt from `set -e`. `lsregister -u` exits non-zero when
+there is nothing to unregister, so this aborted the whole script:
+
+```sh
+[ -n "$phys" ] && [ "$phys" != "$p" ] && "$LSREGISTER" -u "$phys"   # WRONG
+```
+
+`make-dmg.sh` stopped straight after creating the disk image — never signing,
+notarizing or verifying it — and still exited 0, leaving an unsigned DMG that
+looked finished. Guard every such call:
+
+```sh
+if [ -n "$phys" ] && [ "$phys" != "$p" ]; then
+  "$LSREGISTER" -u "$phys" 2>/dev/null || true
+fi
+```
+
+The general lesson: an exit status of 0 is not evidence that the work happened.
+`make-dmg.sh` now verifies its own output by mounting the finished image and
+assessing the app inside it, which is the check that would have caught this.
+
+## Unregister before the path disappears
+
+`lsregister -u` cannot reliably drop a record for a path that is already gone,
+and LaunchServices stores the *physical* path — `/tmp` and `/var` are symlinks
+to `/private/tmp` and `/private/var`, so the logical form does not match. Both
+mistakes were made here at once, and the "fix" changed nothing until each was
+corrected. Unregister while the path still exists, and try the resolved form too.

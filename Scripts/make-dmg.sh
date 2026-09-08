@@ -31,8 +31,7 @@ hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG" 
 # bundle it sees, and a registration pointing at a deleted path makes usernoted
 # fail to resolve the bundle (_LSBundleCreateNode ... returned -43), which can
 # stop the app appearing in System Settings > Notifications at all.
-LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-[ -x "$LSREGISTER" ] && "$LSREGISTER" -u "$STAGE/$APP_NAME.app" 2>/dev/null || true
+ls_unregister "$STAGE/$APP_NAME.app"
 rm -rf "$STAGE"
 
 if [ "$IDENTITY" != "-" ]; then
@@ -48,6 +47,24 @@ if [ "$IDENTITY" != "-" ]; then
 else
     printf "\n\033[1;33mNOTE:\033[0m adhoc build — DMG is unsigned and will warn on other Macs.\n"
 fi
+
+# Verify the artifact the way a recipient receives it, rather than trusting the
+# build log: mount the image and assess the app inside it.
+say "Verifying the image as a recipient receives it"
+MNT=$(mktemp -d)
+hdiutil attach "$DMG" -nobrowse -quiet -mountpoint "$MNT"
+spctl -a -vvv -t execute "$MNT/$APP_NAME.app" 2>&1 | head -3 | sed 's/^/  /'
+if xcrun stapler validate "$MNT/$APP_NAME.app" >/dev/null 2>&1; then
+    echo "  stapled ticket valid — opens offline, no Gatekeeper warning"
+else
+    echo "  WARNING: no stapled ticket; users without network will see a warning"
+fi
+# Mounting registered the app inside the image. Drop that registration BEFORE
+# unmounting, while the path still exists - afterwards lsregister cannot match
+# it, and a dangling record recreates the bug in docs/DEVELOPMENT.md.
+ls_unregister "$MNT/$APP_NAME.app"
+hdiutil detach "$MNT" -quiet
+rmdir "$MNT" 2>/dev/null || true
 
 say "Done"
 ls -lh "$DMG"

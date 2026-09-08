@@ -13,6 +13,32 @@ BUNDLE_ID="it.salamacchine.idlewild"
 TEAM_ID="${TEAM_ID:-}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
 
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+
+# Drop a LaunchServices registration for a path that is about to disappear.
+# A registration pointing at a deleted path makes usernoted fail to resolve the
+# bundle (_LSBundleCreateNode ... -43), which silently stops notifications
+# working for the *installed* copy. Staging directories and mounted disk images
+# both create these.
+# Call this while the path still EXISTS - lsregister cannot reliably drop a
+# record for something already deleted or unmounted.
+ls_unregister() {
+  local p="$1"
+  [ -x "$LSREGISTER" ] || return 0
+  "$LSREGISTER" -u "$p" 2>/dev/null || true
+  # LaunchServices stores the physical path. /tmp and /var are symlinks to
+  # /private/tmp and /private/var, so the logical form alone does not match.
+  local phys
+  phys="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/$(basename "$p")"
+  # Guard every lsregister call with `|| true`. It exits non-zero when there is
+  # nothing to unregister, and under `set -e` a failing command at the tail of an
+  # && chain is NOT exempt — it aborts the whole script silently.
+  if [ -n "$phys" ] && [ "$phys" != "$p" ]; then
+    "$LSREGISTER" -u "$phys" 2>/dev/null || true
+  fi
+  return 0
+}
+
 say() { printf "\n\033[1;34m==>\033[0m %s\n" "$*"; }
 die() { printf "\n\033[1;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 
