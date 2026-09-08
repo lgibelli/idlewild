@@ -16,6 +16,7 @@ final class AppSettings: @unchecked Sendable {
         static let allow = "allowList"
         static let notify = "notificationsEnabled"
         static let launchAtLogin = "launchAtLogin"
+        static let checkUpdates = "checkForUpdates"
     }
 
     init() {
@@ -25,6 +26,7 @@ final class AppSettings: @unchecked Sendable {
             K.calm: 120.0,
             K.notify: true,
             K.launchAtLogin: false,
+            K.checkUpdates: true,
             K.allow: Self.defaultAllowList,
         ])
     }
@@ -50,6 +52,8 @@ final class AppSettings: @unchecked Sendable {
         get { d.bool(forKey: K.notify) } set { d.set(newValue, forKey: K.notify) } }
     var launchAtLogin: Bool {
         get { d.bool(forKey: K.launchAtLogin) } set { d.set(newValue, forKey: K.launchAtLogin) } }
+    var checkForUpdates: Bool {
+        get { d.bool(forKey: K.checkUpdates) } set { d.set(newValue, forKey: K.checkUpdates) } }
     var allowList: [String] {
         get { d.stringArray(forKey: K.allow) ?? Self.defaultAllowList }
         set { d.set(newValue, forKey: K.allow) } }

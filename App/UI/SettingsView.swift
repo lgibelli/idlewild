@@ -20,7 +20,7 @@ struct SettingsView: View {
             AboutPane(monitor: monitor)
                 .tabItem { Label("About", systemImage: "info.circle") }
         }
-        .frame(width: 560, height: 452)
+        .frame(width: 560, height: 496)
     }
 }
 
@@ -33,6 +33,7 @@ private struct DetectionPane: View {
     @State private var interval: Double = 120
     @State private var notify = true
     @State private var launchAtLogin = false
+    @State private var checkUpdates = true
     @State private var loginError: String?
 
     var body: some View {
@@ -80,6 +81,17 @@ private struct DetectionPane: View {
                         }
                     }
                     .onChange(of: launchAtLogin) { _, v in setLogin(v) }
+
+                    Divider()
+
+                    Toggle(isOn: $checkUpdates) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Check for updates")
+                            Text("Contacts salamacchine.it once a day. Nothing is downloaded or installed automatically.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .onChange(of: checkUpdates) { _, _ in save() }
                 }
                 // macOS renders Toggle as a checkbox inside a form-like layout
                 // unless the switch style is requested explicitly.
@@ -129,6 +141,7 @@ private struct DetectionPane: View {
         interval = monitor.settings.calmInterval
         notify = monitor.settings.notificationsEnabled
         launchAtLogin = SMAppService.mainApp.status == .enabled
+        checkUpdates = monitor.settings.checkForUpdates
     }
 
     private func save() {
@@ -136,6 +149,7 @@ private struct DetectionPane: View {
         monitor.settings.sustainMinutes = sustain
         monitor.settings.calmInterval = interval
         monitor.settings.notificationsEnabled = notify
+        monitor.settings.checkForUpdates = checkUpdates
         monitor.settingsChanged()
     }
 
@@ -147,6 +161,7 @@ private struct DetectionPane: View {
         } catch {
             loginError = "Could not change login item: \(error.localizedDescription)"
             launchAtLogin = SMAppService.mainApp.status == .enabled
+        checkUpdates = monitor.settings.checkForUpdates
         }
     }
 }
@@ -263,6 +278,25 @@ private struct AboutPane: View {
         return "Version \(v) (\(b))"
     }
 
+    @ViewBuilder
+    private var updates: some View {
+        if let u = monitor.updates.available {
+            VStack(spacing: 4) {
+                Text("Version \(u.version) is available")
+                    .font(.caption.bold()).foregroundStyle(.orange)
+                Button("Download\u{2026}") { monitor.updates.openDownloadPage() }
+                    .controlSize(.small)
+            }
+        } else {
+            HStack(spacing: 10) {
+                Text(monitor.settings.checkForUpdates ? "Idlewild is up to date" : "Update checks are off")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Check Now") { monitor.updates.check(manual: true) }
+                    .controlSize(.small)
+            }
+        }
+    }
+
     var body: some View {
         VStack(spacing: 12) {
             Spacer(minLength: 0)
@@ -297,6 +331,24 @@ private struct AboutPane: View {
             Text("For comparison, a typical menu bar CPU meter costs about 3.6%.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+
+            Divider().padding(.vertical, 2)
+
+            updates
+
+            Text("Copyright \u{00A9} 2026 Luca Gibelli")
+                .font(.caption).foregroundStyle(.secondary)
+            Text("Released under the GNU General Public License, version 3 or later. Idlewild comes with absolutely no warranty. You are free to change it and redistribute it under the same licence.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 24)
+            HStack(spacing: 14) {
+                Link("Licence", destination: URL(string: "https://www.gnu.org/licenses/gpl-3.0.html")!)
+                Link("Source", destination: URL(string: "https://github.com/lgibelli/idlewild")!)
+            }
+            .font(.caption)
 
             Spacer(minLength: 0)
         }

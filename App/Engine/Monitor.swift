@@ -25,6 +25,7 @@ final class Monitor: ObservableObject {
     private(set) var ownCPUms: Double = 0
 
     let settings = AppSettings()
+    let updates: UpdateChecker
     /// Owned exclusively by `queue`. Every access - including from the UI -
     /// must go through `queue`, which is what makes the unchecked annotation
     /// safe. Detector holds mutable per-pid state, so touching it from the main
@@ -36,6 +37,7 @@ final class Monitor: ObservableObject {
     private let started = Date()
 
     init() {
+        updates = UpdateChecker(settings: settings)
         detector = Detector(settings: settings)
         AppDelegate.monitor = self      // so notification actions can reach us
         start()
@@ -126,6 +128,7 @@ final class Monitor: ObservableObject {
     func settingsChanged() {
         let s = settings
         queue.async { [detector] in detector.settings = s }
+        updates.settingsChanged()
         if !isPaused { schedule(interval: settings.calmInterval) }
     }
 

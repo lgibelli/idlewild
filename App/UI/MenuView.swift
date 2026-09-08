@@ -31,6 +31,13 @@ struct MenuView: View {
             Button("Open Notification Settings…") { Notifier.openSettings() }
         }
 
+        if let update = monitor.updates.available {
+            Divider()
+            Button("Download Idlewild \(update.version)\u{2026}") {
+                monitor.updates.openDownloadPage()
+            }
+        }
+
         Divider()
         Button(monitor.isPaused ? "Resume Monitoring" : "Pause Monitoring") {
             monitor.togglePause()

@@ -108,6 +108,40 @@ fussiness: the first version matched substrings and shipped `"ld"` for the
 linker, which silently allowlisted everything under `/var/folders/` — because
 "folders" contains "ld". The end-to-end test caught it.
 
+## Updates
+
+Idlewild checks `https://www.salamacchine.it/apps/idlewild/latest.json` once a
+day and, when a newer version exists, adds a download item to the menu. It never
+downloads or installs anything by itself.
+
+That restraint is the point. An updater that fetches and executes code turns its
+feed into a way to run arbitrary software on every user's machine, which is why
+Sparkle requires the feed to be signed with an EdDSA key and the public half
+embedded in the app. Getting that wrong (an empty `SUPublicEDKey`, say) silently
+disables the check while everything still appears to work. Idlewild reports the
+version and opens the download page, so macOS applies Gatekeeper to whatever the
+user chooses to run, exactly as it would for a fresh download.
+
+The check sends an HTTP request to salamacchine.it, which necessarily reveals the
+user's IP address and the app version in the User-Agent. Settings has a toggle to
+turn it off, and the wording there says what it contacts.
+
+Feed format:
+
+```json
+{
+  "version": "1.0.1",
+  "url": "https://www.salamacchine.it/apps/idlewild/",
+  "notes": "What changed.",
+  "minimumSystemVersion": "14.0"
+}
+```
+
+The proposed URL is checked before anything is opened: it must be `https` on
+salamacchine.it or github.com, so a mistyped or tampered feed cannot send anyone
+somewhere unexpected. Version comparison is numeric per component, so 1.10.0
+correctly sorts above 1.9.0.
+
 ## Verifying a download
 
 Every release is built, signed and notarized by GitHub Actions, and carries a
