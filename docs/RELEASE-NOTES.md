@@ -1,3 +1,36 @@
+# Idlewild 1.2.0
+
+Idlewild updates itself.
+
+It used to read a small JSON feed, say that a version existed and open the
+download page — which left you dragging the app out of a disk image by hand, and
+left the copy in Applications behind the one being worked on. Updates now arrive
+in the app, through Sparkle, the framework the rest of the Mac apps distributed
+outside the App Store use: it says a version is available, shows what changed,
+downloads it, verifies it and relaunches.
+
+The verification is the point. A disk image installs only if it carries an
+Ed25519 signature made with a private key that exists only in the release job and
+in the maintainer's keychain, *and* only if the app inside it is signed by the
+same team as the one already running. Somebody who takes over the web server can
+change the feed; they cannot make the app install anything.
+
+A menu bar app is not allowed to steal focus, so a scheduled alert would appear
+behind whatever you are doing. While an update is being handled, Idlewild rejoins
+the Dock, badges its icon and posts a notification, then steps back into the
+background.
+
+## Also
+
+- `CFBundleVersion` is now a real build number, `major*10000 + minor*100 +
+  patch`. Sparkle compares that rather than the version string, so 1.1.1's build
+  number of "1" could not have been followed by another release.
+- The "Check for updates" switch in Settings now drives Sparkle's own setting
+  instead of a second copy in our defaults. The app still contacts
+  salamacchine.it once a day, and nothing installs without asking.
+- The menu's "Download Idlewild …" item is gone; the update alert replaces it,
+  and "Check for Updates…" asks on demand.
+
 # Idlewild 1.1.1
 
 A reported duration that had stopped counting.

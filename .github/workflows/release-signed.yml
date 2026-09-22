@@ -85,6 +85,24 @@ jobs:
       - name: Run the end-to-end test against a real CPU burner
         run: ./Scripts/e2e-test.sh
 
+      # The appcast is what Sparkle reads, and every item in it is signed with
+      # the Ed25519 key. The key lives here and in the maintainer's keychain,
+      # never in the repository, so this is the only place a release can be
+      # signed for distribution.
+      - name: Generate and sign the appcast
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          SPARKLE_PRIVATE_KEY_FILE: ${{ runner.temp }}/sparkle-ed-key
+        run: |
+          set -euo pipefail
+          [ -n "$SPARKLE_ED_PRIVATE_KEY" ] || {
+            echo "::error::SPARKLE_ED_PRIVATE_KEY is not set — the update feed cannot be signed"
+            exit 1
+          }
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > "$SPARKLE_PRIVATE_KEY_FILE"
+          chmod 600 "$SPARKLE_PRIVATE_KEY_FILE"
+          ./Scripts/make-appcast.sh
+
       - name: Resolve artifact paths
         id: artifacts
         run: |
@@ -92,6 +110,8 @@ jobs:
           VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" App/Resources/Info.plist)
           DMG="build/Idlewild-$VERSION.dmg"
           [ -f "$DMG" ] || { echo "::error::DMG not found at $DMG"; exit 1; }
+          APPCAST="build/appcast/appcast.xml"
+          [ -f "$APPCAST" ] || { echo "::error::appcast not found at $APPCAST"; exit 1; }
           # Stable, versionless copy so a website can link to
           # /releases/latest/download/Idlewild-latest.dmg permanently.
           cp "$DMG" "build/Idlewild-latest.dmg"
@@ -100,6 +120,7 @@ jobs:
             echo "tag=v$VERSION"
             echo "dmg=$DMG"
             echo "latest=build/Idlewild-latest.dmg"
+            echo "appcast=$APPCAST"
           } >> "$GITHUB_OUTPUT"
 
       # Records a signed statement in Sigstore's public transparency log binding
@@ -119,6 +140,7 @@ jobs:
           VERSION: ${{ steps.artifacts.outputs.version }}
           DMG: ${{ steps.artifacts.outputs.dmg }}
           LATEST: ${{ steps.artifacts.outputs.latest }}
+          APPCAST: ${{ steps.artifacts.outputs.appcast }}
           # Passed via env, never interpolated into the shell: a crafted value
           # could otherwise inject commands into this secret-bearing job.
           NOTES: ${{ inputs.notes }}
@@ -126,11 +148,12 @@ jobs:
           set -euo pipefail
           BODY="${NOTES:-Idlewild $VERSION}"
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-            gh release upload "$TAG" --repo "$REPO" --clobber "$DMG" "$LATEST"
+            gh release upload "$TAG" --repo "$REPO" --clobber "$DMG" "$LATEST" "$APPCAST"
           else
             gh release create "$TAG" --repo "$REPO" \
               --title "Idlewild $VERSION" --notes "$BODY" \
-              --target "$GITHUB_SHA" "$DMG" "$LATEST"
+              --target "$GITHUB_SHA" "$DMG" "$LATEST" "$APPCAST"
           fi
           echo ">> published: https://github.com/$REPO/releases/tag/$TAG"
           echo ">> verify with: gh attestation verify $(basename "$DMG") --repo $REPO"
+          echo ">> copy $(basename "$APPCAST") to www/public/apps/idlewild/ in the site repository"

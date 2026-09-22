@@ -16,7 +16,6 @@ final class AppSettings: @unchecked Sendable {
         static let allow = "allowList"
         static let notify = "notificationsEnabled"
         static let launchAtLogin = "launchAtLogin"
-        static let checkUpdates = "checkForUpdates"
         static let cpu = "cpuEnabled"
         static let memory = "memoryEnabled"
         static let memoryShare = "memoryShareThreshold"
@@ -33,7 +32,6 @@ final class AppSettings: @unchecked Sendable {
             K.calm: 120.0,
             K.notify: true,
             K.launchAtLogin: false,
-            K.checkUpdates: true,
             K.cpu: true,
             K.memory: true,
             K.memoryShare: 50.0,
@@ -65,8 +63,6 @@ final class AppSettings: @unchecked Sendable {
         get { d.bool(forKey: K.notify) } set { d.set(newValue, forKey: K.notify) } }
     var launchAtLogin: Bool {
         get { d.bool(forKey: K.launchAtLogin) } set { d.set(newValue, forKey: K.launchAtLogin) } }
-    var checkForUpdates: Bool {
-        get { d.bool(forKey: K.checkUpdates) } set { d.set(newValue, forKey: K.checkUpdates) } }
     var cpuEnabled: Bool {
         get { d.bool(forKey: K.cpu) } set { d.set(newValue, forKey: K.cpu) } }
     var memoryEnabled: Bool {

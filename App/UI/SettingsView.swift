@@ -121,7 +121,7 @@ private struct GeneralPane: View {
                         .onChange(of: launchAtLogin) { _, v in setLogin(v) }
                     Divider()
                     SwitchRow(title: "Check for updates",
-                              caption: "Contacts salamacchine.it once a day. Nothing is downloaded or installed automatically.",
+                              caption: "Contacts salamacchine.it once a day. An update has to carry our signature to install.",
                               isOn: $checkUpdates)
                         .onChange(of: checkUpdates) { _, _ in save() }
                 }
@@ -143,14 +143,16 @@ private struct GeneralPane: View {
         interval = monitor.settings.calmInterval
         notify = monitor.settings.notificationsEnabled
         launchAtLogin = SMAppService.mainApp.status == .enabled
-        checkUpdates = monitor.settings.checkForUpdates
+        checkUpdates = monitor.updates.automaticallyChecksForUpdates
         colouredIcon = monitor.settings.colouredIcon
     }
 
     private func save() {
         monitor.settings.calmInterval = interval
         monitor.settings.notificationsEnabled = notify
-        monitor.settings.checkForUpdates = checkUpdates
+        // Sparkle owns this one and persists it itself, so the switch writes
+        // straight through instead of keeping a second copy in our defaults.
+        monitor.updates.automaticallyChecksForUpdates = checkUpdates
         monitor.settings.colouredIcon = colouredIcon
         monitor.settingsChanged()
     }

@@ -111,4 +111,35 @@ enum Notifier {
                 }
             }
     }
+
+    /// One slot, reused: there is only ever one update waiting.
+    static let updateNotificationID = "idlewild-update"
+
+    /// Sparkle found a new version. Its alert cannot take focus from whatever
+    /// the user is doing — a dockless app is not allowed to interrupt — so on a
+    /// menu bar app the alert can sit behind everything and never be seen. This
+    /// is the reminder Sparkle's documentation asks for; clicking it starts the
+    /// update, see AppDelegate.
+    static func postUpdate(version: String, enabled: Bool) {
+        guard enabled else { return }
+        let n = UNMutableNotificationContent()
+        n.title = "Idlewild \(version) is available"
+        n.body = "Open Idlewild to install it."
+        n.sound = .default
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: updateNotificationID, content: n, trigger: nil)) { error in
+                if let error {
+                    nlog.error("update notification failed: \(error.localizedDescription, privacy: .public)")
+                } else {
+                    nlog.notice("posted update notification for \(version, privacy: .public)")
+                }
+            }
+    }
+
+    /// Called when the user has seen the update alert, so the reminder does not
+    /// outlive it.
+    static func dismissUpdate() {
+        UNUserNotificationCenter.current()
+            .removeDeliveredNotifications(withIdentifiers: [updateNotificationID])
+    }
 }

@@ -100,3 +100,66 @@ signing_identity() {
   fi
   echo "-"
 }
+
+# ---- Sparkle: the update framework ----------------------------------------
+#
+# Idlewild ships outside the App Store, so it updates itself, and Sparkle is the
+# framework every other non-App-Store Mac app uses for that (HandBrake, and
+# VLC and Transmission before it). There is no Xcode project here, so the
+# framework is vendored from the official release tarball - which is the path
+# Sparkle's own documentation gives for a build that is not Xcode.
+#
+# The tarball is pinned by SHA-256 because the framework inside it ships adhoc
+# signed: there is no upstream signature to check, so the pin is what makes the
+# download reproducible. We re-sign every piece with our own identity anyway,
+# since a framework signed by another team cannot be loaded under the hardened
+# runtime.
+SPARKLE_VERSION="2.10.0"
+SPARKLE_SHA256="c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c"
+SPARKLE_VENDOR="$PROJECT_ROOT/build/vendor/sparkle-$SPARKLE_VERSION"
+
+# fetch_sparkle - download, verify and unpack the distribution. Prints the
+# directory holding Sparkle.framework and bin/.
+fetch_sparkle() {
+  if [ ! -d "$SPARKLE_VENDOR/Sparkle.framework" ]; then
+    local tarball="$PROJECT_ROOT/build/vendor/Sparkle-$SPARKLE_VERSION.tar.xz"
+    mkdir -p "$SPARKLE_VENDOR"
+    if [ ! -f "$tarball" ]; then
+      curl -sSL --fail -o "$tarball" \
+        "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_VERSION/Sparkle-$SPARKLE_VERSION.tar.xz" \
+        || die "could not download Sparkle $SPARKLE_VERSION"
+    fi
+    local got
+    got=$(shasum -a 256 "$tarball" | cut -d' ' -f1)
+    [ "$got" = "$SPARKLE_SHA256" ] || die "Sparkle $SPARKLE_VERSION tarball has the wrong hash.
+       expected $SPARKLE_SHA256
+       got      $got"
+    # Only what we ship. The distribution also carries a test app, which
+    # LaunchServices would happily register as an application — and a
+    # registration pointing into build/ is a record that outlives it.
+    tar -xf "$tarball" -C "$SPARKLE_VENDOR" \
+        ./Sparkle.framework ./bin ./LICENSE ./CHANGELOG \
+        || die "could not unpack $tarball"
+  fi
+  echo "$SPARKLE_VENDOR"
+}
+
+# sign_sparkle_framework <framework-path> <identity>
+#
+# Inside out: Sparkle's own executables and services first, then the framework
+# that contains them. Their entitlements are preserved as shipped, and every
+# piece gets the hardened runtime, which notarization requires of nested code
+# too. The framework keeps its upstream identifier; library validation compares
+# the team, not the identifier.
+sign_sparkle_framework() {
+  local fw="$1" identity="$2" item
+  for item in "$fw/Versions/B/Autoupdate" \
+              "$fw/Versions/B/Updater.app" \
+              "$fw"/Versions/B/XPCServices/*.xpc; do
+    [ -e "$item" ] || continue
+    codesign --force --options runtime --timestamp \
+             --preserve-metadata=entitlements \
+             --sign "$identity" "$item" >/dev/null
+  done
+  codesign --force --options runtime --timestamp --sign "$identity" "$fw" >/dev/null
+}

@@ -16,22 +16,18 @@ struct AboutView: View {
         return "Version \(v) (\(b))"
     }
 
+    /// Sparkle draws its own update alert, so this is only a line saying whether
+    /// the daily check is on and a way to ask for one now.
     @ViewBuilder
     private var updates: some View {
-        if let u = monitor.updates.available {
-            VStack(spacing: 4) {
-                Text("Version \(u.version) is available")
-                    .font(.caption.bold()).foregroundStyle(.orange)
-                Button("Download\u{2026}") { monitor.updates.openDownloadPage() }
-                    .controlSize(.small)
-            }
-        } else {
-            HStack(spacing: 10) {
-                Text(monitor.settings.checkForUpdates ? "Idlewild is up to date" : "Update checks are off")
-                    .font(.caption).foregroundStyle(.secondary)
-                Button("Check Now") { monitor.updates.check(manual: true) }
-                    .controlSize(.small)
-            }
+        HStack(spacing: 10) {
+            Text(monitor.updates.automaticallyChecksForUpdates
+                 ? "Checks for updates once a day"
+                 : "Update checks are off")
+                .font(.caption).foregroundStyle(.secondary)
+            Button("Check Now") { monitor.updates.checkForUpdates() }
+                .controlSize(.small)
+                .disabled(!monitor.updates.canCheckForUpdates)
         }
     }
 

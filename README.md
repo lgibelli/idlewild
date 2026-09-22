@@ -14,6 +14,10 @@ the actions worth taking.
 It was written after a Safari tab spent nine and a half hours pegging a core on
 a fanless MacBook Air, entirely unnoticed.
 
+It keeps itself up to date, through Sparkle: an update installs only if its disk
+image carries an Ed25519 signature made with a key that never leaves the release
+job, and only if the app inside is signed by the same team as the one running.
+
 ## What makes it different
 
 Most CPU monitors tell you *that* something is busy. Idlewild tells you **why**,
@@ -138,10 +142,15 @@ Runtime.
 ## Building
 
 ```sh
-./Scripts/build.sh                 # builds and adhoc-signs build/Idlewild.app
+./Scripts/build.sh                 # builds and signs build/Idlewild.app
 open build/Idlewild.app
 ./Scripts/e2e-test.sh              # spawns a real CPU burner and a real leak, asserts on both
 ```
+
+The first build downloads Sparkle — pinned by version and SHA-256 — into
+`build/vendor/`, and links it into the bundle. There is no package manager
+involved: the framework comes from Sparkle's own release tarball, which is what
+its documentation points a build without Xcode at.
 
 Release — copy `release.env.example` to `release.env`, fill in your Team ID and
 notarytool profile, then:
@@ -149,12 +158,14 @@ notarytool profile, then:
 ```sh
 ./Scripts/notarize.sh     # build, sign, submit, staple, verify with spctl
 ./Scripts/make-dmg.sh     # package, sign and notarize the DMG itself
+./Scripts/make-appcast.sh # sign the DMG into the appcast Sparkle reads
 ```
 
 `build.sh` signs with the Developer ID Application identity for your `TEAM_ID`
 when one is in the keychain, and falls back to adhoc otherwise — printing the
 designated requirement either way, since that is what macOS uses as the app's
-identity for permissions.
+identity for permissions. Adhoc builds also disable library validation, or the
+Sparkle framework could not be loaded at all.
 
 There is no Xcode project — `swiftc` assembles the bundle directly, so the whole
 build is reproducible from a shell.
@@ -167,9 +178,10 @@ App/Engine/Detector.swift         detection state machine
 App/Engine/Diagnoser.swift        stack sampling and classification
 App/Engine/Monitor.swift          timer, cadence, coordination
 App/UI/                           menu bar and settings
-App/Support/                      preferences, signals, notifications
+App/Support/                      preferences, signals, notifications, updates
 cli/main.swift                    headless CLI (scan / watch / selftest / cost)
 Scripts/sandbox-probe.sh          reproduces the App Store findings
 Scripts/e2e-test.sh               end-to-end test against a controlled burner
+Scripts/make-appcast.sh           signs a disk image into the update feed
 Scripts/make-icon.swift           generates the app icon
 ```

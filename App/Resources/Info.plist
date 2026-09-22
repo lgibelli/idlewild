@@ -15,9 +15,11 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.1.1</string>
+	<string>1.2.0</string>
+	<!-- Sparkle compares this, not the short version string, so it has to keep
+	     increasing: major*10000 + minor*100 + patch. 1.2.0 is 10200. -->
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>10200</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
@@ -28,5 +30,27 @@
 	<false/>
 	<key>NSSupportsSuddenTermination</key>
 	<false/>
+	<!-- Updates, via Sparkle. See App/Support/Updater.swift.
+
+	     SUPublicEDKey is the trust anchor: the appcast is only a hint, and an
+	     update installs only if it carries an Ed25519 signature made with the
+	     matching private key (which lives in the release job's secrets and in
+	     the maintainer's keychain) and is signed by the same team as the app
+	     already running. The feed being compromised is therefore not enough.
+
+	     SUEnableAutomaticChecks: check daily without asking permission first,
+	     which is what this app did before Sparkle. SUVerifyUpdateBeforeExtraction
+	     makes Sparkle check the signature before it unpacks the disk image,
+	     rather than after. -->
+	<key>SUFeedURL</key>
+	<string>https://www.salamacchine.it/apps/idlewild/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>iAuElTvpHub/5F8g7x6jknJeMvAWl73d7OnvUKcocvM=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
 </dict>
 </plist>

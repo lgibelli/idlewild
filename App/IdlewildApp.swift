@@ -95,6 +95,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func userNotificationCenter(_ c: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler done: @escaping () -> Void) {
+        // The reminder Sparkle's gentle API asks for: clicking it is the user
+        // saying "yes, show me", so run the check that opens the update alert.
+        if response.notification.request.identifier == Notifier.updateNotificationID {
+            Task { @MainActor in
+                defer { done() }
+                AppDelegate.monitor?.updates.checkForUpdates()
+            }
+            return
+        }
+
         let info = response.notification.request.content.userInfo
         guard let raw = info["pid"] as? Int else { done(); return }
         let pid = pid_t(raw)

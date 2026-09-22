@@ -32,13 +32,6 @@ struct MenuView: View {
             Button("Open Notification Settings…") { Notifier.openSettings() }
         }
 
-        if let update = monitor.updates.available {
-            Divider()
-            Button("Download Idlewild \(update.version)\u{2026}") {
-                monitor.updates.openDownloadPage()
-            }
-        }
-
         Divider()
         Button(monitor.isPaused ? "Resume Monitoring" : "Pause Monitoring") {
             monitor.togglePause()
@@ -49,6 +42,8 @@ struct MenuView: View {
             openWindow(id: "about")
             NSApp.activate(ignoringOtherApps: true)
         }
+        Button("Check for Updates\u{2026}") { monitor.updates.checkForUpdates() }
+            .disabled(!monitor.updates.canCheckForUpdates)
 
         Divider()
         Button("Quit Idlewild") { NSApp.terminate(nil) }
