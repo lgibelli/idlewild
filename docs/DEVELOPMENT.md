@@ -199,6 +199,29 @@ before you eject:
 lsregister -u /Volumes/Idlewild/Idlewild.app
 ```
 
+### A path that changes under LaunchServices
+
+Replacing the bundle at a path LaunchServices already knows — `build/Idlewild.app`
+on every rebuild, `/Applications/Idlewild.app` on every install — can leave it
+holding a record that no longer describes what is there. The symptom is not an
+error message: the app simply never finishes launching. The process exists, at a
+96K footprint, and samples in `_dyld_start`, with no menu bar item and no log
+output, because none of our code has run yet.
+
+```sh
+sample "$(pgrep -f '/Applications/Idlewild.app/Contents/MacOS')" 1 | head -20
+lsregister -u /Applications/Idlewild.app
+lsregister -f /Applications/Idlewild.app
+killall usernoted
+```
+
+That is what cleared it here, after an unnotarized build had been launched from
+the same path and refused by Gatekeeper (`syspolicyd: GatekeeperPolicyScanError
+-67018, "Code did not match any currently allowed policy"`). Telling apart a path
+problem from a bundle problem is easy once you suspect it: move the bundle
+somewhere else and launch it there. If it starts, the record for the old path is
+what was wrong, not the app.
+
 ## Updates, and the key that makes them safe
 
 The app updates itself with Sparkle. `App/Support/Updater.swift` wraps
