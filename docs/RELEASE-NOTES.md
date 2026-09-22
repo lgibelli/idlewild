@@ -1,3 +1,19 @@
+# Idlewild 1.1.1
+
+A reported duration that had stopped counting.
+
+An incident kept the duration it had when the alert fired, so a process still
+running away twenty minutes later was still described as "5 min" in the menu —
+the one number the whole feature exists to report. The duration is now read from
+the moment the process crossed the threshold, so it keeps counting for as long as
+the process keeps burning, and the menu is refreshed as each minute rolls over.
+
+Memory incidents are unchanged. Theirs is the span of the history a leak was
+fitted to: a measurement, not a clock.
+
+Nothing else changed. Notifications are still one per incident, sent the moment
+it is detected, and never re-posted.
+
 # Idlewild 1.1.0
 
 Idlewild now watches memory as well as CPU.
