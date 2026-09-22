@@ -14,7 +14,24 @@ struct Incident: Identifiable, Equatable {
     let cpuPercent: Double
     let heatWeight: Double      // 0...1, share of time on performance cores
     let ipc: Double
-    let heldFor: TimeInterval
+    /// When a CPU process first crossed the threshold. The duration is read
+    /// from this at display time instead of being frozen when the alert fired:
+    /// the process is normally still running away when the menu is opened, so a
+    /// reading of "5 min" twenty minutes in would be plainly wrong. Memory
+    /// incidents have no crossing instant - theirs is a measurement.
+    var heldSince: Date? = nil
+    /// The measured duration, used as-is by memory incidents (the span a leak's
+    /// history was fitted to) and as the floor for a CPU one, which must never
+    /// read less than it did when the alert fired.
+    var heldMeasured: TimeInterval = 0
+
+    /// How long to say the process has been running away: the live elapsed time
+    /// since it crossed for a CPU incident, the measured span for a memory one.
+    var heldFor: TimeInterval {
+        guard let heldSince else { return heldMeasured }
+        return max(heldMeasured, Date().timeIntervalSince(heldSince))
+    }
+
     let footprintMB: Double
     let growthMBPerMin: Double
     /// Memory incidents only: this process's share of physical RAM, 0...1, and
@@ -252,7 +269,7 @@ final class Detector: @unchecked Sendable {
                             kind: .cpu,
                             pid: pid, name: friendlyName(pid, path), path: path,
                             cpuPercent: pct, heatWeight: s.qos.heatWeight, ipc: s.ipc,
-                            heldFor: held,
+                            heldSince: t.overSince, heldMeasured: held,
                             footprintMB: Double(s.footprint) / 1_048_576,
                             growthMBPerMin: held > 30 ? grownMB / (held / 60) : 0))
                     }
@@ -349,7 +366,7 @@ final class Detector: @unchecked Sendable {
         var i = Incident(kind: .memory,
                          pid: pid, name: friendlyName(pid, path), path: path,
                          cpuPercent: 0, heatWeight: 0, ipc: 0,
-                         heldFor: heldFor,
+                         heldMeasured: heldFor,
                          footprintMB: Double(s.footprint) / 1_048_576,
                          growthMBPerMin: rate)
         i.memoryShare = Double(s.footprint) / Double(HostMemory.physical)

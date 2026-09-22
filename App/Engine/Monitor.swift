@@ -38,6 +38,9 @@ final class Monitor: ObservableObject {
     private var timer: DispatchSourceTimer?
     private var pressureSource: DispatchSourceMemoryPressure?
     private var currentInterval: Double = 0
+    /// The minute each incident's live duration last read, so the menu is
+    /// republished when that changes and not otherwise. See refreshDurations.
+    private var shownMinutes: [Int] = []
     private let started = Date()
 
     init() {
@@ -119,7 +122,25 @@ final class Monitor: ObservableObject {
             }
             let want = suspect ? self.settings.busyInterval : self.settings.calmInterval
             if want != self.currentInterval, !self.isPaused { self.schedule(interval: want) }
+            self.refreshDurations()
         }
+    }
+
+    /// A CPU incident keeps burning after it is reported, and its duration is
+    /// read live from the instant it crossed the threshold, so a menu opened
+    /// twenty minutes in says twenty minutes. That change happens inside a value
+    /// type, and SwiftUI is only told when published state changes, so send the
+    /// notification by hand - once a minute at most, and only while an incident
+    /// is on screen, which is well inside what this app spends looking anyway.
+    private func refreshDurations() {
+        guard !incidents.isEmpty else {
+            shownMinutes.removeAll()
+            return
+        }
+        let minutes = incidents.map { Int($0.heldFor / 60) }
+        guard minutes != shownMinutes else { return }
+        shownMinutes = minutes
+        objectWillChange.send()
     }
 
     private func refreshOwnCost() {
