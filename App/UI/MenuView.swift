@@ -36,6 +36,10 @@ struct MenuView: View {
         Button(monitor.isPaused ? "Resume Monitoring" : "Pause Monitoring") {
             monitor.togglePause()
         }
+        Button("CPU History\u{2026}") {
+            openWindow(id: "history")
+            NSApp.activate(ignoringOtherApps: true)
+        }
         Button("Settings…") { showSettings() }
             .keyboardShortcut(",", modifiers: .command)
         Button("About Idlewild") {
@@ -89,6 +93,11 @@ private struct IncidentMenu: View {
     var body: some View {
         Menu("\(incident.name) — \(incident.menuSummary)") {
             Button("Force Quit") { perform { monitor.kill(incident) } }
+            // Rules act on CPU runaways; a leak is judged on a fit, and its own
+            // Force Quit is the right tool.
+            if incident.kind == .cpu, !incident.path.isEmpty {
+                Button("Always Force Quit \(incident.binaryName)\u{2026}") { alwaysForceQuit() }
+            }
             if incident.canPause {
                 Button("Pause It") { perform { monitor.suspend(incident) } }
             }
@@ -124,6 +133,21 @@ private struct IncidentMenu: View {
             // locale's grouping separator, so pid 26121 came out as "26.121".
             Text(verbatim: "pid \(incident.pid)")
         }
+    }
+
+    /// Asks how long to wait and whether to reopen it, then hands over. A rule
+    /// for a process Idlewild cannot signal would be a promise it cannot keep,
+    /// so that case is refused up front.
+    private func alwaysForceQuit() {
+        guard ProcessActions.canSignal(pid: incident.pid) else {
+            alert("Not permitted",
+                  "\(incident.name) belongs to another user, so Idlewild cannot stop it.")
+            return
+        }
+        let restart = ProcessActions.restart(for: incident.pid, name: incident.binaryName)
+        guard let rule = AutoQuitPrompt.ask(name: incident.binaryName, restart: restart,
+                                            settings: monitor.settings) else { return }
+        monitor.alwaysForceQuit(incident, rule: rule)
     }
 
     /// A menu cannot show inline errors, so report a failure the native way.

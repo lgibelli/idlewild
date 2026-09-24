@@ -23,6 +23,7 @@ final class AppSettings: @unchecked Sendable {
         static let memoryFill = "memoryFillHours"
         static let colouredIcon = "colouredIcon"
         static let snoozed = "snoozedUntil"
+        static let autoQuit = "autoQuit"
     }
 
     init() {
@@ -174,5 +175,65 @@ final class AppSettings: @unchecked Sendable {
         let name = (path as NSString).lastPathComponent
         guard !name.isEmpty, !allowList.contains(name) else { return }
         allowList = allowList + [name]
+    }
+
+    // MARK: - Always force quit
+    //
+    // The opposite of the allowlist: a program the user never wants to be asked
+    // about again, because the answer is always the same. Keyed by the full
+    // executable path, never the name - "Always Force Quit helper" must not
+    // reach every binary on the machine that happens to be called helper.
+
+    private var autoQuits: [String: [String: Double]] {
+        get { d.dictionary(forKey: K.autoQuit) as? [String: [String: Double]] ?? [:] }
+        set { d.set(newValue, forKey: K.autoQuit) }
+    }
+
+    func autoQuitRule(path: String) -> AutoQuitRule? {
+        guard !path.isEmpty, let r = autoQuits[path] else { return nil }
+        return AutoQuitRule(after: r["after"] ?? 0, restart: (r["restart"] ?? 0) != 0)
+    }
+
+    /// A snooze on the same program would only postpone the rule, so it goes.
+    func setAutoQuit(path: String, rule: AutoQuitRule) {
+        guard !path.isEmpty else { return }
+        var m = autoQuits
+        m[path] = ["after": rule.after, "restart": rule.restart ? 1 : 0]
+        autoQuits = m
+        clearSnooze(key: path)
+    }
+
+    func removeAutoQuit(path: String) {
+        var m = autoQuits; m.removeValue(forKey: path); autoQuits = m
+    }
+
+    func autoQuitRules() -> [(path: String, rule: AutoQuitRule)] {
+        autoQuits.keys.sorted {
+            ($0 as NSString).lastPathComponent.localizedCaseInsensitiveCompare(
+                ($1 as NSString).lastPathComponent) == .orderedAscending
+        }
+        .compactMap { p in autoQuitRule(path: p).map { (path: p, rule: $0) } }
+    }
+}
+
+struct AutoQuitRule: Equatable {
+    /// How long the process must have been running away before it is force
+    /// quit, counted from when it crossed the threshold. Anything shorter than
+    /// the sustain window means "as soon as it is caught".
+    var after: TimeInterval
+    /// Open it again afterwards. Only an app can be; see ProcessActions.restart.
+    var restart: Bool
+
+    var waitText: String {
+        after <= 0 ? "as soon as it is caught" : "after " + Self.span(after)
+    }
+
+    static func span(_ t: TimeInterval) -> String {
+        if t < 3600 {
+            let m = Int(t / 60)
+            return "\(m) minute\(m == 1 ? "" : "s")"
+        }
+        let h = t / 3600
+        return h == h.rounded() ? "\(Int(h)) hour\(h == 1 ? "" : "s")" : String(format: "%.1f hours", h)
     }
 }

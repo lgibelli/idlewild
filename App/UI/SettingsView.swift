@@ -335,10 +335,12 @@ private struct ExceptionsPane: View {
     @State private var selection: Set<String> = []
     @State private var newEntry = ""
     @State private var snoozes: [(key: String, until: Date)] = []
+    @State private var autoQuits: [(path: String, rule: AutoQuitRule)] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             snoozeSection
+            autoQuitSection
             Text("Never alert about these")
                 .font(.headline)
             Text("Matched against whole path components, so \"ffmpeg\" or \"Final Cut Pro.app\" is enough. A build that pegs a core for a minute is normal; these are the things that do it legitimately for hours.")
@@ -379,6 +381,37 @@ private struct ExceptionsPane: View {
         .onAppear {
             entries = monitor.settings.allowList
             snoozes = monitor.settings.activeSnoozes()
+            autoQuits = monitor.settings.autoQuitRules()
+        }
+    }
+
+    /// Shown only when there are rules, for the same reason as the snoozes:
+    /// a program that keeps vanishing needs a place that says why.
+    @ViewBuilder
+    private var autoQuitSection: some View {
+        if !autoQuits.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Always force quit").font(.headline)
+                ForEach(autoQuits, id: \.path) { r in
+                    HStack(spacing: 8) {
+                        Image(systemName: "bolt.circle")
+                            .foregroundStyle(.red.opacity(0.85)).font(.caption)
+                        Text((r.path as NSString).lastPathComponent)
+                            .lineLimit(1).truncationMode(.middle)
+                            .help(r.path)
+                        Spacer(minLength: 8)
+                        Text(r.rule.waitText + (r.rule.restart ? ", then reopened" : ""))
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button("Remove") {
+                            monitor.settings.removeAutoQuit(path: r.path)
+                            autoQuits = monitor.settings.autoQuitRules()
+                        }
+                        .controlSize(.small)
+                    }
+                }
+            }
+            .padding(10)
+            .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
         }
     }
 

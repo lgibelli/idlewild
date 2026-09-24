@@ -34,6 +34,9 @@ final class Monitor: ObservableObject {
     /// safe. Detector holds mutable per-pid state, so touching it from the main
     /// actor while a scan is in flight would be a genuine data race.
     private let detector: Detector
+    /// Where the CPU went, for the history window. Owned by `queue` exactly as
+    /// the detector is.
+    private let history = CPUHistory()
     private let queue = DispatchQueue(label: "it.salamacchine.idlewild.scan", qos: .utility)
     private var timer: DispatchSourceTimer?
     private var pressureSource: DispatchSourceMemoryPressure?
@@ -98,12 +101,15 @@ final class Monitor: ObservableObject {
     private nonisolated func tick() {
         let found = detector.scan()
         let suspect = detector.hasActiveSuspect
+        let ongoing = detector.ongoing
+        history.record(detector.takeUsage())
 
         // Diagnosis is expensive, so it happens here on the utility queue,
         // never on main, and only for confirmed CPU incidents. A stack sample
-        // says nothing about a leak; memory incidents arrive already explained.
+        // says nothing about a leak; memory incidents arrive already explained,
+        // and a process about to be force quit by a rule needs no explaining.
         let enriched = found.map { inc -> Incident in
-            guard inc.kind == .cpu else { return inc }
+            guard inc.kind == .cpu, inc.autoQuit == nil else { return inc }
             var i = inc
             i.cause = Diagnoser.diagnose(pid: inc.pid,
                                         processName: (inc.path as NSString).lastPathComponent).cause
@@ -114,7 +120,12 @@ final class Monitor: ObservableObject {
             guard let self else { return }
             self.lastScan = Date()
             self.refreshOwnCost()
+            self.resolve(keeping: ongoing)
             for i in enriched {
+                if let rule = i.autoQuit {
+                    self.autoQuit(i, rule)
+                    continue
+                }
                 self.incidents.removeAll { $0.pid == i.pid }
                 self.incidents.append(i)
                 log.notice("incident: \(i.name, privacy: .public) pid \(i.pid) \(i.summary, privacy: .public) cause=\(i.cause, privacy: .public)")
@@ -123,6 +134,44 @@ final class Monitor: ObservableObject {
             let want = suspect ? self.settings.busyInterval : self.settings.calmInterval
             if want != self.currentInterval, !self.isPaused { self.schedule(interval: want) }
             self.refreshDurations()
+        }
+    }
+
+    /// An incident is listed for as long as it is true, and no longer. Before
+    /// this an incident stayed until somebody clicked it, and with the duration
+    /// counting live a process that had exited at 23:32 was shown the next
+    /// morning as "97% for 11.1 hours".
+    private func resolve(keeping ongoing: Set<pid_t>) {
+        let over = incidents.filter { !ongoing.contains($0.pid) }
+        guard !over.isEmpty else { return }
+        incidents.removeAll { !ongoing.contains($0.pid) }
+        for i in over {
+            log.notice("resolved: \(i.name, privacy: .public) pid \(i.pid) is no longer running away")
+            Notifier.withdraw(pid: i.pid)
+        }
+    }
+
+    /// Carries out an "Always Force Quit" rule. If the process cannot be
+    /// stopped after all, the user is told the ordinary way, so a rule that
+    /// fails never turns into silence.
+    private func autoQuit(_ incident: Incident, _ rule: AutoQuitRule) {
+        // Asked before the kill, while there is still a process to ask about.
+        let reopen = rule.restart ? ProcessActions.appURL(pid: incident.pid) : nil
+        switch ProcessActions.forceKill(pid: incident.pid) {
+        case .ok:
+            log.notice("force quit \(incident.name, privacy: .public) pid \(incident.pid) by rule, \(incident.summary, privacy: .public)")
+            if let reopen { ProcessActions.reopen(reopen, after: incident.pid) }
+            Notifier.postAutoQuit(incident: incident, reopened: reopen != nil,
+                                  enabled: settings.notificationsEnabled)
+        case .gone:
+            break
+        case .notPermitted, .failed:
+            var i = incident
+            i.autoQuit = nil
+            i.cause = "Idlewild was set to force quit it, but the system would not let it"
+            incidents.removeAll { $0.pid == i.pid }
+            incidents.append(i)
+            Notifier.post(incident: i, enabled: settings.notificationsEnabled)
         }
     }
 
@@ -159,6 +208,7 @@ final class Monitor: ObservableObject {
 
     func dismiss(_ incident: Incident) {
         incidents.removeAll { $0.id == incident.id }
+        Notifier.withdraw(pid: incident.pid)
         let pid = incident.pid
         queue.async { [detector] in detector.suppress(pid: pid) }
     }
@@ -183,6 +233,34 @@ final class Monitor: ObservableObject {
     func alwaysAllow(_ incident: Incident) {
         settings.allow(path: incident.path)
         dismiss(incident)
+    }
+
+    /// From now on this program is stopped instead of reported, the run that
+    /// prompted the rule included.
+    func alwaysForceQuit(_ incident: Incident, rule: AutoQuitRule) {
+        settings.setAutoQuit(path: incident.path, rule: rule)
+        log.notice("always force quit \(incident.path, privacy: .public) \(rule.waitText, privacy: .public)")
+        incidents.removeAll { $0.id == incident.id }
+        Notifier.withdraw(pid: incident.pid)
+        let pid = incident.pid
+        queue.async { [detector] in detector.rearm(pid: pid) }
+    }
+
+    // MARK: - History
+
+    func historySnapshot() async -> HistoryData {
+        await withCheckedContinuation { c in
+            queue.async { [history] in c.resume(returning: history.snapshot()) }
+        }
+    }
+
+    func clearHistory() {
+        queue.async { [history] in history.clear() }
+    }
+
+    /// Called as the app quits, so the last quarter of an hour is kept.
+    func saveHistory() {
+        queue.sync { history.save() }
     }
 
     /// Settings changed while a scan may be running; hand the new values over on

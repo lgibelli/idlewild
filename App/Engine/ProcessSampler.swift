@@ -114,6 +114,64 @@ enum HostMemory {
     }
 }
 
+/// Whole-machine CPU time, for the part of the history no process accounts
+/// for. A third of the processes on a Mac belong to root or to system users,
+/// and proc_pid_rusage refuses to measure them for us, as it refuses the
+/// kernel; the host counters include everything, so the difference between the
+/// two is what macOS kept to itself.
+enum HostCPU {
+    static let cores: Int = {
+        var n: Int32 = 0
+        var sz = MemoryLayout<Int32>.size
+        return sysctlbyname("hw.logicalcpu", &n, &sz, nil, 0) == 0 && n > 0 ? Int(n) : 1
+    }()
+
+    static let ticksPerSecond = Double(max(sysconf(Int32(_SC_CLK_TCK)), 1))
+
+    /// Ticks every core has spent in user, system and nice since boot. Each is
+    /// a 32-bit counter that wraps after a few weeks of load, so callers keep
+    /// the three apart and subtract with wrapping arithmetic.
+    typealias Ticks = (user: UInt32, system: UInt32, nice: UInt32)
+
+    static func busyTicks() -> Ticks? {
+        var load = host_cpu_load_info()
+        var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info>.size / MemoryLayout<integer_t>.size)
+        let kr = withUnsafeMutablePointer(to: &load) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &count)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return nil }
+        let t = load.cpu_ticks
+        return (UInt32(t.0), UInt32(t.1), UInt32(t.3))
+    }
+
+    /// CPU-seconds, summed over every core, used between two readings.
+    static func seconds(from a: Ticks, to b: Ticks) -> Double {
+        let ticks = UInt64(b.user &- a.user) + UInt64(b.system &- a.system) + UInt64(b.nice &- a.nice)
+        return Double(ticks) / ticksPerSecond
+    }
+}
+
+/// Where the history files a process's CPU time: under the app it belongs to,
+/// so a browser's forty helpers add up to the browser, or under its own name
+/// when it is not part of an app. Nil when there is nothing to call it.
+func accountName(_ pid: pid_t, _ path: String) -> String? {
+    // WebKit's processes live in the system framework, not in any app, and
+    // serve Safari and every other app showing web content.
+    if path.contains("com.apple.WebKit.") { return "Safari & WebKit" }
+    // The outermost bundle: ".../Google Chrome.app/.../Helper (Renderer).app/..."
+    // belongs to Google Chrome.
+    if let r = path.range(of: ".app/") {
+        let app = (String(path[..<r.lowerBound]) as NSString).lastPathComponent
+        // Safari's own process and its web pages are one thing to a user.
+        if app == "Safari" { return "Safari & WebKit" }
+        if !app.isEmpty { return app }
+    }
+    let n = path.isEmpty ? procName(pid) : displayName(pid, path)
+    return n.isEmpty ? nil : n
+}
+
 func formatBytes(_ b: UInt64) -> String {
     let mb = Double(b) / 1_048_576
     return mb < 1000 ? String(format: "%.0f MB", mb) : String(format: "%.1f GB", mb / 1024)
@@ -150,11 +208,26 @@ func procName(_ pid: pid_t) -> String {
 /// (".../2.1.263/toolname") where the basename is a version string.
 func displayName(_ pid: pid_t, _ path: String) -> String {
     let base = (path as NSString).lastPathComponent
-    if base.isEmpty || base.allSatisfy({ $0.isNumber || $0 == "." }) {
+    if base.isEmpty || isVersion(base) {
         let n = procName(pid)
+        if !n.isEmpty && !isVersion(n) { return n }
+        // Some tools are named after their own version, ".../claude/versions/
+        // 2.1.281", and the kernel's name for them is the same number. The
+        // program is whatever owns the versions directory.
+        if let owner = versionOwner(path) { return owner }
         if !n.isEmpty { return n }
     }
     return base.isEmpty ? "pid \(pid)" : base
+}
+
+private func isVersion(_ s: String) -> Bool {
+    !s.isEmpty && s.allSatisfy { $0.isNumber || $0 == "." }
+}
+
+private func versionOwner(_ path: String) -> String? {
+    let generic: Set<String> = ["versions", "version", "releases", "current", "bin", "libexec"]
+    return path.split(separator: "/").reversed().map(String.init)
+        .first { !isVersion($0) && !generic.contains($0.lowercased()) }
 }
 
 /// "com.apple.WebKit.WebContent" means nothing to a user. We cannot get the tab

@@ -35,6 +35,13 @@ struct IdlewildApp: App {
         }
         .windowResizability(.contentSize)
         .defaultPosition(.center)
+
+        Window("CPU History", id: "history") {
+            HistoryView(load: { await monitor.historySnapshot() },
+                        clear: { monitor.clearHistory() })
+        }
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
     }
 
     private var iconName: String {
@@ -83,6 +90,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func applicationDidFinishLaunching(_ n: Notification) {
         Notifier.configure(delegate: self)
+    }
+
+    func applicationWillTerminate(_ n: Notification) {
+        MainActor.assumeIsolated { AppDelegate.monitor?.saveHistory() }
     }
 
     /// Show the banner even when Idlewild is the active app.

@@ -63,6 +63,7 @@ enum Notifier {
                                             actions: [kill] + snoozeActions,
                                             intentIdentifiers: [], options: [])
         c.setNotificationCategories([category, memory])
+        withdrawLeftovers()
         c.requestAuthorization(options: [.alert, .sound]) { granted, error in
             Task { @MainActor in
                 if let error {
@@ -108,6 +109,49 @@ enum Notifier {
                     nlog.error("post failed: \(error.localizedDescription, privacy: .public)")
                 } else {
                     nlog.notice("posted notification for pid \(incident.pid)")
+                }
+            }
+    }
+
+    /// Takes back the alert for a process that has exited, calmed down or been
+    /// dealt with. A Focus mode holds notifications back, so without this a
+    /// process that ran away at night was announced in the morning, hours
+    /// after it had gone.
+    static func withdraw(pid: pid_t) {
+        let id = ["runaway-\(pid)"]
+        let c = UNUserNotificationCenter.current()
+        c.removePendingNotificationRequests(withIdentifiers: id)
+        c.removeDeliveredNotifications(withIdentifiers: id)
+    }
+
+    /// Takes back every alert left over from a previous run. Incidents do not
+    /// survive a restart, so each one describes a process nobody is watching
+    /// any more, and its actions would find nothing to act on.
+    static func withdrawLeftovers() {
+        let c = UNUserNotificationCenter.current()
+        c.getDeliveredNotifications { delivered in
+            let stale = delivered.map(\.request.identifier).filter { $0.hasPrefix("runaway-") }
+            if !stale.isEmpty {
+                c.removeDeliveredNotifications(withIdentifiers: stale)
+                nlog.notice("withdrew \(stale.count) notifications left from a previous run")
+            }
+        }
+    }
+
+    /// Reports what an "Always Force Quit" rule did. Silent, with no actions:
+    /// the user already decided, and this is a record rather than a question.
+    static func postAutoQuit(incident: Incident, reopened: Bool, enabled: Bool) {
+        guard enabled else { return }
+        let n = UNMutableNotificationContent()
+        n.title = "Force quit \(incident.name)"
+        n.body = String(format: "It had been at %.0f%% CPU for %@.", incident.cpuPercent,
+                        formatDuration(incident.heldFor))
+            + (reopened ? " Idlewild opened it again." : "")
+        n.userInfo = ["name": incident.name]
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: "autoquit-\(incident.pid)", content: n, trigger: nil)) { error in
+                if let error {
+                    nlog.error("post failed: \(error.localizedDescription, privacy: .public)")
                 }
             }
     }

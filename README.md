@@ -70,9 +70,14 @@ keeps it quiet:
   Logic, Blender, Resolve. Editable in Settings.
 - **Sustain window** — 100% for 30 s is a build; for 9 hours it is a bug. This
   is the single most important setting.
-- **Idle-thread guard** — a stack dominated by `__psynch_cvwait` means threads
-  are parked, so Idlewild says the CPU time may be elsewhere and leaves that
-  process alone.
+- **Idle-thread guard** — every thread is sampled whether it runs or not, so
+  parked threads top a stack summary even in a busy process. Idlewild looks past
+  the wait frames to the code that is working and names it; only when nothing
+  is working does it say the CPU time may be elsewhere.
+- **Dips are not calm** — a process has to stay under the threshold for a minute
+  before its clock restarts, so one busy hour is one alert. An incident leaves
+  the menu, and its notification is withdrawn, as soon as the process exits or
+  calms down.
 - **Memory growth** — RSS climbing steadily while CPU is pinned is strong
   strong evidence of a runaway loop.
 - **Pause It** as an alternative to Force Quit — `SIGSTOP` stops the burn without
@@ -126,6 +131,31 @@ fussiness: the first version matched substrings and shipped `"ld"` for the
 linker, which silently allowlisted everything under `/var/folders/` — because
 "folders" contains "ld". The end-to-end test caught it.
 
+## Always Force Quit
+
+Some programs have only one right answer. A runaway's menu offers Always Force
+Quit, which asks how long the program may run away first and, for an app,
+whether to open it again afterwards. After that Idlewild stops it without asking
+and posts a silent notification saying it did. Only an app can honestly be
+reopened; anything else was started by something with its own arguments and
+environment, and the prompt says so instead of guessing. Rules match the exact
+executable path and are listed in Settings → Exceptions.
+
+## Where the CPU went
+
+CPU History draws the last 24 hours, 7 days or 30 days as a radial bar chart:
+time runs clockwise round a ring, and each slice is a spoke stacked by app. The
+radius is area-true: each segment's area is proportional to the
+CPU time it stands for.
+
+The data costs nothing extra to collect. Each scan already computes every
+process's CPU delta for detection; filing it under the app it belongs to is a
+dictionary update. Whole-machine time comes from the host tick counters, and the
+difference between the two is shown as System & kernel: a third of the processes
+on a Mac belong to root or system users, and `proc_pid_rusage` will not measure
+them for an unprivileged app. Five-minute slices are kept for a day and hourly
+ones for a month, in a binary property list under Application Support.
+
 ## Not on the Mac App Store
 
 It cannot be. Under the App Sandbox, `proc_listpids`, `proc_pid_rusage` and
@@ -177,6 +207,7 @@ App/Engine/ProcessSampler.swift   kernel primitives, QoS and IPC
 App/Engine/Detector.swift         detection state machine
 App/Engine/Diagnoser.swift        stack sampling and classification
 App/Engine/Monitor.swift          timer, cadence, coordination
+App/Engine/History.swift          CPU history: slices, tiers, storage
 App/UI/                           menu bar and settings
 App/Support/                      preferences, signals, notifications, updates
 cli/main.swift                    headless CLI (scan / watch / selftest / cost)

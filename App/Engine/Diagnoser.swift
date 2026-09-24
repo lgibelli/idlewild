@@ -45,18 +45,56 @@ enum Diagnoser {
         for rule in rules where rule.needles.allSatisfy({ hay.contains($0) }) {
             return Verdict(cause: rule.cause, confident: rule.confident)
         }
-        // Guard against accusing a process whose threads are merely parked.
-        if hay.contains("__psynch_cvwait") || hay.contains("mach_msg2_trap") {
+        // Every thread is sampled whether it runs or not, so in a process with
+        // a dozen parked threads and one busy one the parked frames top the
+        // list: 10,200 samples in __psynch_cvwait against 1,700 in the loop
+        // that was actually burning the core. Look past them.
+        guard let hot = hottestWork(hay) else {
             return Verdict(cause: "threads look idle - the CPU time may be elsewhere",
                            confident: false)
         }
         // No framework matched, but the hot frames belong to the process itself:
         // a plain compute loop in its own code. Common, and worth naming rather
         // than shrugging at.
-        if !processName.isEmpty, hay.contains("(in \(processName))") {
+        if !processName.isEmpty, hot == processName {
             return Verdict(cause: "a tight loop in the program's own code", confident: true)
         }
-        return Verdict(cause: "cause unclear", confident: false)
+        // Otherwise say whose code it is. "Busy in SpotlightKnowledgeDaemon"
+        // tells a user more than "cause unclear" ever will.
+        return Verdict(cause: "busy in \(hot)", confident: false)
+    }
+
+    /// Frames a thread sits in while it waits for something, not working.
+    private static let waitFrames = [
+        "__psynch_cvwait", "__psynch_mutexwait", "mach_msg2_trap", "mach_msg_trap",
+        "__semwait_signal", "__workq_kernreturn", "kevent", "__select", "__ulock_wait",
+        "__sigsuspend", "__wait4", "__recvfrom", "__read_nocancel", "poll",
+    ]
+
+    /// The image holding the busiest frame that is not a wait, from the "Sort
+    /// by top of stack" summary. Nil when waiting is all the threads were doing
+    /// - fewer than 100 working samples, a twentieth of one core over the two
+    /// second sample.
+    static func hottestWork(_ summary: Substring) -> String? {
+        var best: (image: String, count: Int)?
+        var working = 0
+        for line in summary.split(separator: "\n", omittingEmptySubsequences: false).dropFirst() {
+            let text = line.trimmingCharacters(in: .whitespaces)
+            if text.isEmpty { break }
+            guard let open = text.range(of: "(in "),
+                  let close = text.range(of: ")", range: open.upperBound..<text.endIndex),
+                  let count = Int(text[close.upperBound...].trimmingCharacters(in: .whitespaces))
+            else { continue }
+            let symbol = text[..<open.lowerBound].trimmingCharacters(in: .whitespaces)
+            if waitFrames.contains(where: { symbol.hasPrefix($0) }) { continue }
+            working += count
+            if count > (best?.count ?? 0) {
+                var image = String(text[open.upperBound..<close.lowerBound])
+                if image.hasSuffix(".dylib") { image.removeLast(6) }
+                best = (image, count)
+            }
+        }
+        return working >= 100 ? best?.image : nil
     }
 
     private static func runSample(pid: pid_t, seconds: Int, timeout: TimeInterval) -> String? {

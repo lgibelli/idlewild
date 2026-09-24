@@ -43,6 +43,9 @@ struct Incident: Identifiable, Equatable {
     /// memory. Nil when it is not growing.
     var fillsIn: TimeInterval? = nil
     var cause: String = ""
+    /// Set when an "Always Force Quit" rule covers this process: it is to be
+    /// stopped, not reported.
+    var autoQuit: AutoQuitRule? = nil
 
     static func == (a: Incident, b: Incident) -> Bool { a.id == b.id }
 
@@ -156,6 +159,9 @@ private struct Track {
     var lastCPU: UInt64
     var lastFootprint: UInt64
     var overSince: Date?
+    /// When a process that is running away first dipped back under the
+    /// threshold. See Detector.calmAfter.
+    var underSince: Date?
     var footprintAtCross: UInt64
     var alerted = false
     var lastPercent: Double = 0
@@ -169,6 +175,10 @@ private struct Track {
     var memPeak: UInt64 = 0
     var memAlerted = false
     var pressureAlerted = false
+
+    /// The name the history files this process's CPU time under, resolved the
+    /// first time it uses any.
+    var account: String?
 
     init(startAbs: UInt64, cpu: UInt64, footprint: UInt64) {
         self.startAbs = startAbs
@@ -201,6 +211,12 @@ final class Detector: @unchecked Sendable {
     /// only once pressure has cleared or the named process has gone.
     private var pressureNamed: pid_t?
 
+    /// CPU time used since the last takeUsage(), by app, for the history. The
+    /// deltas are computed for detection anyway; filing them costs a dictionary
+    /// update per busy process per scan.
+    private var usage = Usage()
+    private var lastHostTicks: HostCPU.Ticks?
+
     var settings: AppSettings
 
     init(settings: AppSettings) { self.settings = settings }
@@ -223,6 +239,34 @@ final class Detector: @unchecked Sendable {
     /// never accumulates more than a few hundred bytes of it.
     static let historyCap = 64
 
+    /// How long a process that is running away must stay under the threshold
+    /// before it counts as calm. Without this one quiet scan reset the clock:
+    /// a process busy for an hour was reported four times in twenty minutes,
+    /// and a rule to force quit something after an hour could never fire on a
+    /// process that paused for breath.
+    static let calmAfter: TimeInterval = 60
+
+    /// A gap between scans longer than this is the machine asleep or
+    /// monitoring paused. The CPU used across it cannot be placed in time, so
+    /// the history leaves the gap empty rather than piling it into one slice.
+    static let longestAccountedGap: TimeInterval = 900
+
+    /// Processes whose incident is still true: running away, allowing for
+    /// brief dips, or still holding the memory they were reported for. Monitor
+    /// drops every incident not in here, so a process that has exited or calmed
+    /// down stops being listed as running away.
+    var ongoing: Set<pid_t> {
+        var s = Set<pid_t>()
+        for (pid, t) in tracks where t.overSince != nil || t.memAlerted { s.insert(pid) }
+        return s
+    }
+
+    /// Hands over the CPU time recorded since the last call and starts afresh.
+    func takeUsage() -> Usage {
+        defer { usage = Usage() }
+        return usage
+    }
+
     func scan(syntheticDt: Double? = nil) -> [Incident] {
         let now = Date()
         let dt = syntheticDt ?? now.timeIntervalSince(lastScan)
@@ -243,40 +287,82 @@ final class Detector: @unchecked Sendable {
         var seen = Set<pid_t>()
         var hogs: [(pid: pid_t, sample: ProcSample)] = []
 
+        // The first scan only learns where every counter stands. After that a
+        // process with no track was born since the last scan, so all the CPU
+        // it has ever used falls inside this window.
+        let primed = !tracks.isEmpty
+        let accounting = primed && dt <= Self.longestAccountedGap
+        if let host = HostCPU.busyTicks() {
+            if accounting, let last = lastHostTicks {
+                usage.busy += HostCPU.seconds(from: last, to: host)
+            }
+            lastHostTicks = host
+        }
+        if accounting { usage.span += dt }
+
         for pid in lister.list() {
             guard pid > 0, let s = sampleProc(pid) else { continue }
             seen.insert(pid)
 
             guard var t = tracks[pid], t.startAbs == s.startAbs else {
-                tracks[pid] = Track(startAbs: s.startAbs, cpu: s.cpuNanos, footprint: s.footprint)
+                var fresh = Track(startAbs: s.startAbs, cpu: s.cpuNanos, footprint: s.footprint)
+                if accounting { charge(pid, &fresh, nanos: s.cpuNanos) }
+                tracks[pid] = fresh
                 continue
             }
 
-            let pct = (Double(s.cpuNanos &- t.lastCPU) / 1e9) / dt * 100.0
+            let used = s.cpuNanos &- t.lastCPU
+            if accounting { charge(pid, &t, nanos: used) }
+            let pct = (Double(used) / 1e9) / dt * 100.0
             t.lastCPU = s.cpuNanos
             t.lastFootprint = s.footprint
             t.lastPercent = pct
 
-            if watchCPU && pct >= settings.cpuThreshold && pid != selfPID {
+            let over = watchCPU && pct >= settings.cpuThreshold && pid != selfPID
+            if over {
+                t.underSince = nil
                 if t.overSince == nil { t.overSince = now; t.footprintAtCross = s.footprint }
-                let held = now.timeIntervalSince(t.overSince!)
-                if held >= settings.sustainSeconds && !t.alerted {
-                    t.alerted = true
+            } else if t.overSince == nil {
+                t.alerted = false
+            } else {
+                // A dip. The clock keeps running until the process has stayed
+                // down long enough to count as calm.
+                let under = t.underSince ?? now
+                t.underSince = under
+                if !watchCPU || now.timeIntervalSince(under) >= Self.calmAfter {
+                    t.overSince = nil
+                    t.underSince = nil
+                    t.alerted = false
+                }
+            }
+
+            if over, let since = t.overSince, !t.alerted {
+                let held = now.timeIntervalSince(since)
+                if held >= settings.sustainSeconds {
                     let path = cachedPath(pid)
-                    if !settings.isAllowed(path: path), !settings.isSnoozed(path: path) {
-                        let grownMB = Double(Int64(s.footprint) - Int64(t.footprintAtCross)) / 1_048_576
-                        incidents.append(Incident(
-                            kind: .cpu,
-                            pid: pid, name: friendlyName(pid, path), path: path,
-                            cpuPercent: pct, heatWeight: s.qos.heatWeight, ipc: s.ipc,
-                            heldSince: t.overSince, heldMeasured: held,
-                            footprintMB: Double(s.footprint) / 1_048_576,
-                            growthMBPerMin: held > 30 ? grownMB / (held / 60) : 0))
+                    let grownMB = Double(Int64(s.footprint) - Int64(t.footprintAtCross)) / 1_048_576
+                    var incident = Incident(
+                        kind: .cpu,
+                        pid: pid, name: friendlyName(pid, path), path: path,
+                        cpuPercent: pct, heatWeight: s.qos.heatWeight, ipc: s.ipc,
+                        heldSince: since, heldMeasured: held,
+                        footprintMB: Double(s.footprint) / 1_048_576,
+                        growthMBPerMin: held > 30 ? grownMB / (held / 60) : 0)
+                    if let rule = settings.autoQuitRule(path: path) {
+                        // Nobody is asked. The process is left alone until it
+                        // has run away for as long as the rule allows.
+                        if held >= rule.after {
+                            t.alerted = true
+                            incident.autoQuit = rule
+                            incidents.append(incident)
+                        }
+                    } else {
+                        t.alerted = true
+                        if !settings.isAllowed(path: path), !settings.isSnoozed(path: path) {
+                            incidents.append(incident)
+                        }
                     }
                 }
-            } else {
-                t.overSince = nil
-                t.alerted = false
             }
 
             if watchMemory && pid != selfPID {
@@ -377,11 +463,28 @@ final class Detector: @unchecked Sendable {
         return i
     }
 
+    /// Files CPU time under the app it belongs to. Processes with no name to
+    /// file it under are left out, and their time lands in the part of the
+    /// history the host counters account for and no process does.
+    private func charge(_ pid: pid_t, _ t: inout Track, nanos: UInt64) {
+        guard nanos > 0 else { return }
+        if t.account == nil { t.account = accountName(pid, cachedPath(pid)) }
+        guard let name = t.account else { return }
+        usage.seconds[name, default: 0] += Double(nanos) / 1e9
+    }
+
     private func cachedPath(_ pid: pid_t) -> String {
         if let p = pathCache[pid] { return p }
         let p = execPath(pid)
         pathCache[pid] = p
         return p
+    }
+
+    /// A rule was just made for a process already reported. Let the next scan
+    /// look at it again, so the rule covers the run that prompted it: the
+    /// process is stopped then, or when its wait is up.
+    func rearm(pid: pid_t) {
+        tracks[pid]?.alerted = false
     }
 
     /// Called when the user chooses "ignore this one" so we stop re-alerting.
