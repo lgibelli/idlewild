@@ -394,7 +394,7 @@ private struct RadialPanel: View {
         let dx = p.x - g.center.x, dy = p.y - g.center.y
         let d = (dx * dx + dy * dy).squareRoot()
         guard d >= g.inner - 14, d <= g.outer + 14 else { return nil }
-        var t = atan2(dx, -dy) / (2 * .pi)
+        var t = Double(atan2(dx, -dy)) / (2 * .pi)
         if t < 0 { t += 1 }
         return chart.bin(atTurn: t)
     }
@@ -408,16 +408,15 @@ private struct Follow: ViewModifier {
     @State private var size: CGSize = .zero
 
     func body(content: Content) -> some View {
-        content
+        let w = size.width, h = size.height
+        let dx: CGFloat = point.x + 18 + w > bounds.width ? -(w / 2 + 18) : w / 2 + 18
+        let dy: CGFloat = point.y + 18 + h > bounds.height ? -(h / 2 + 12) : h / 2 + 12
+        return content
             .background(GeometryReader { g in
                 Color.clear.onAppear { size = g.size }.onChange(of: g.size) { _, s in size = s }
             })
-            .position(x: clamp(point.x + (point.x + 18 + size.width > bounds.width
-                                          ? -(size.width / 2 + 18) : size.width / 2 + 18),
-                               size.width / 2, bounds.width - size.width / 2),
-                      y: clamp(point.y + (point.y + 18 + size.height > bounds.height
-                                          ? -(size.height / 2 + 12) : size.height / 2 + 12),
-                               size.height / 2, bounds.height - size.height / 2))
+            .position(x: clamp(point.x + dx, w / 2, bounds.width - w / 2),
+                      y: clamp(point.y + dy, h / 2, bounds.height - h / 2))
     }
 
     private func clamp(_ v: CGFloat, _ lo: CGFloat, _ hi: CGFloat) -> CGFloat {
@@ -434,8 +433,10 @@ private struct Geometry {
     /// Room outside for the clock labels.
     var outer: CGFloat { side / 2 - 34 }
 
+    // CGFloat throughout: Swift 6.1 finds `cos` of a Double times a CGFloat
+    // ambiguous between CoreGraphics and libm, where newer compilers pick one.
     func point(_ r: CGFloat, _ turn: Double) -> CGPoint {
-        let a = turn * 2 * .pi - .pi / 2
+        let a = CGFloat(turn * 2 * .pi - .pi / 2)
         return CGPoint(x: center.x + r * cos(a), y: center.y + r * sin(a))
     }
 }
@@ -463,7 +464,7 @@ private struct RadialChart: View, Animatable {
     private func radius(_ v: Double) -> CGFloat {
         let r0 = geometry.inner, r1 = geometry.outer
         let f = min(max(v / scaleMax, 0), 1)
-        return (r0 * r0 + (r1 * r1 - r0 * r0) * f).squareRoot()
+        return (r0 * r0 + (r1 * r1 - r0 * r0) * CGFloat(f)).squareRoot()
     }
 
     var body: some View {
@@ -754,7 +755,7 @@ private struct Legend: View {
             GeometryReader { g in
                 Capsule()
                     .fill(palette.tint(s.tint))
-                    .frame(width: max(2, g.size.width * share), height: 3)
+                    .frame(width: max(2, g.size.width * CGFloat(share)), height: 3)
             }
             .frame(height: 3)
             .padding(.leading, 18)
