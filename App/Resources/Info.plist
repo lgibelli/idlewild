@@ -15,11 +15,11 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.2.0</string>
+	<string>1.2.1</string>
 	<!-- Sparkle compares this, not the short version string, so it has to keep
 	     increasing: major*10000 + minor*100 + patch. 1.2.0 is 10200. -->
 	<key>CFBundleVersion</key>
-	<string>10200</string>
+	<string>10201</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>

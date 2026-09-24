@@ -1,3 +1,45 @@
+# Idlewild 1.2.1
+
+A process that had stopped running away stayed listed as running away.
+
+An incident left the menu only when somebody clicked it, and since 1.1.1 its
+duration counts live. So a process that finished its work at 23:32 was still in
+the menu the next morning as "97% for 11.1 hours", long after it had exited. An
+incident now leaves the menu as soon as its process exits or stays under the
+threshold for a minute, and its notification goes with it, including one a Focus
+mode was holding back overnight. Alerts left over from before an update are
+cleared at launch.
+
+## Always Force Quit
+
+A runaway's menu has a new item, Always Force Quit. It asks how long the program
+may run away first, from "as soon as it is caught" up to two hours, and, for an
+app, whether to open it again afterwards. From then on Idlewild stops it without
+asking and leaves a quiet notification saying so. Rules are tied to the
+program's exact path, and are listed, and removed, in Settings → Exceptions.
+
+## CPU History
+
+A new window, CPU History, shows where the machine's CPU time went over the last
+24 hours, 7 days or 30 days. Time runs round a clock face and each slice of it
+bursts outwards, stacked by app. Hover a slice for its breakdown, or an app in
+the list to pick it out of the chart. CPU time macOS will not let an app
+attribute, such as root's processes and the kernel, is shown as System & kernel.
+The record stays on this Mac, costs one dictionary update per busy process per
+scan, and can be cleared from the window.
+
+## Also
+
+- A dip under the threshold for a scan or two no longer restarts the clock. One
+  busy hour of Spotlight's knowledge daemon was reported four times in twenty
+  minutes.
+- A busy process with idle threads is no longer described as "threads look
+  idle". Every thread is sampled whether it runs or not, so parked threads top
+  the summary; Idlewild now looks past them to the code that is working and
+  names it.
+- A tool whose executable is named after its version, like Claude Code's
+  `claude/versions/2.1.281`, now appears as claude.
+
 # Idlewild 1.2.0
 
 Idlewild updates itself.
