@@ -179,6 +179,10 @@ private struct Track {
     /// The name the history files this process's CPU time under, resolved the
     /// first time it uses any.
     var account: String?
+    /// The account was named while the process was under a second old, when it
+    /// may still have been a launcher about to exec into something else. It is
+    /// named once more, from a fresh path, the next time the process uses CPU.
+    var accountProvisional = false
 
     init(startAbs: UInt64, cpu: UInt64, footprint: UInt64) {
         self.startAbs = startAbs
@@ -250,6 +254,13 @@ final class Detector: @unchecked Sendable {
     /// monitoring paused. The CPU used across it cannot be placed in time, so
     /// the history leaves the gap empty rather than piling it into one slice.
     static let longestAccountedGap: TimeInterval = 900
+
+    /// Launchers exec into the program they start within milliseconds:
+    /// xpcproxy for every launchd job, xpcproxy_sim for every process in the
+    /// iOS Simulator, arch, a shell's exec. A process named this young is named
+    /// again later; without that, a Simulator app first seen in that instant
+    /// filed hours of its CPU under xpcproxy_sim.
+    static let launcherWindow: UInt64 = 1_000_000_000
 
     /// Processes whose incident is still true: running away, allowing for
     /// brief dips, or still holding the memory they were reported for. Monitor
@@ -471,7 +482,13 @@ final class Detector: @unchecked Sendable {
     /// history the host counters account for and no process does.
     private func charge(_ pid: pid_t, _ t: inout Track, nanos: UInt64) {
         guard nanos > 0 else { return }
-        if t.account == nil { t.account = accountName(pid, cachedPath(pid)) }
+        if t.account == nil || t.accountProvisional {
+            let secondLook = t.accountProvisional
+            if secondLook { pathCache[pid] = nil }
+            t.account = accountName(pid, cachedPath(pid))
+            t.accountProvisional = !secondLook
+                && absToNanos(mach_absolute_time() &- t.startAbs) < Self.launcherWindow
+        }
         guard let name = t.account else { return }
         usage.seconds[name, default: 0] += Double(nanos) / 1e9
     }

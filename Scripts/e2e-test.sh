@@ -92,6 +92,81 @@ GDUPES=$(grep -c "pid $GROWER" "$LOG")
 grep -B1 "pid $BURNER" "$LOG" | grep -q "MEMORY HOG" && check 1 "burner was reported as a memory hog" || check 0 "burner was not reported as a memory hog"
 grep -B1 "pid $GROWER" "$LOG" | grep -q "RUNAWAY" && check 1 "grower was reported as a CPU runaway" || check 0 "grower was not reported as a CPU runaway"
 
+# The app's own engine, which the CLI above does not share: where CPU History
+# files time. A launcher that execs into a busy program must leave the time
+# under the program (an iOS Simulator app once filed hours under xpcproxy_sim),
+# and a stored history with wrapped readings in it must come back with the real
+# time kept and 584-year wraps gone.
+echo "checking the app's CPU accounting..."
+# The burner shares the spinner's name; left running it would blur the figures.
+kill -9 "$BURNER" "$GROWER" 2>/dev/null; BURNER=""; GROWER=""
+mkdir -p "$WORK/engine"   # top-level code has to live in a main.swift
+cat > "$WORK/engine/main.swift" <<'SWIFT'
+import Foundation
+import os
+let log = Logger(subsystem: "idlewild-engine-test", category: "test")
+
+func execNaming(_ spinner: String) -> Bool {
+    let d = Detector(settings: AppSettings())
+    Thread.sleep(forTimeInterval: 0.1)       // a scan under 50 ms after the last is ignored
+    _ = d.scan()                             // learns where every counter stands
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
+    p.arguments = ["-e", "select(undef,undef,undef,0.4); exec \"\(spinner)\""]
+    try! p.run()
+    defer { kill(p.processIdentifier, SIGKILL) }
+    Thread.sleep(forTimeInterval: 0.1)
+    _ = d.scan()                             // first sight, while it is still perl
+    let early = d.takeUsage().seconds
+    Thread.sleep(forTimeInterval: 1.5)       // it has exec'd and burned about a second
+    _ = d.scan()
+    let later = d.takeUsage().seconds
+    let spun = later["idlewild_test_spinner"] ?? 0, perl = later["perl"] ?? 0
+    print(String(format: "  launcher seen: %@; then spinner %.2f s, perl %.3f s",
+                 early["perl"] != nil ? "yes" : "no", spun, perl))
+    return early["perl"] != nil && spun > 0.5 && perl < 0.1
+}
+
+struct Stored: Codable { var version = 1; var fine: [Slice]; var coarse: [Slice]; var open: Slice? }
+
+func wraps(_ dir: String) -> Bool {
+    let w = Slice.wrap
+    var s = Slice(start: 0)
+    s.apps = ["three": 3 * w + 12.5, "stepback": w - 0.0005, "honest": 100]
+    s.other = w + 2
+    var ok = s.removeWraps() == 3 && abs(s.apps["three"]! - 12.5) < 0.001
+        && s.apps["stepback"] == nil && s.apps["honest"] == 100 && abs(s.other - 2) < 0.001
+        && s.removeWraps() == 0
+    let now = Date().timeIntervalSince1970
+    var hour = Slice(start: (now / 3600).rounded(.down) * 3600)
+    hour.seen = 300; hour.busy = 600; hour.apps = ["xpcproxy_sim": w + 22.4, "OneDrive": 30]
+    var five = hour; five.start = (now / 300).rounded(.down) * 300 - 300
+    let url = URL(fileURLWithPath: dir).appendingPathComponent("history.plist")
+    try! PropertyListEncoder().encode(Stored(fine: [five], coarse: [hour], open: nil)).write(to: url)
+    let loaded = CPUHistory(url: url).snapshot()
+    let all = loaded.fine + loaded.coarse
+    ok = ok && all.count == 2 && all.allSatisfy {
+        abs(($0.apps["xpcproxy_sim"] ?? 0) - 22.4) < 0.001 && $0.apps["OneDrive"] == 30
+    }
+    let saved = try! PropertyListDecoder().decode(Stored.self, from: Data(contentsOf: url))
+    return ok && (saved.fine + saved.coarse).allSatisfy { $0.apps.values.allSatisfy { $0 < w / 2 } }
+}
+
+let a = CommandLine.arguments
+switch a.count > 2 ? a[1] : "" {
+case "exec":  exit(execNaming(a[2]) ? 0 : 1)
+case "wraps": exit(wraps(a[2]) ? 0 : 1)
+default:      print("usage: engine-test exec SPINNER | wraps DIR"); exit(2)
+}
+SWIFT
+swiftc -swift-version 5 -target arm64-apple-macos14.0 -o "$WORK/engine-test" \
+    App/Engine/Detector.swift App/Engine/History.swift App/Engine/ProcessSampler.swift \
+    App/Support/AppSettings.swift "$WORK/engine/main.swift" || exit 1
+"$WORK/engine-test" exec "$WORK/idlewild_test_spinner"
+check $? "a launched program's CPU is filed under its own name, not the launcher's"
+"$WORK/engine-test" wraps "$WORK"
+check $? "a stored history loses its wrapped readings and keeps the real time"
+
 echo
 echo "--- watch output ---"; sed 's/^/  /' "$LOG" | head -30
 echo
