@@ -1,3 +1,15 @@
+# Idlewild 1.2.2
+
+CPU History no longer shows a process using centuries of CPU.
+
+While a program hands over to another one, macOS can report its CPU time a
+fraction of a millisecond higher than it does a moment later. When a scan landed
+in that moment, Idlewild read the step back as 584 years of CPU and filed it in
+the history, most often under xpcproxy_sim, which starts every process in the
+iOS Simulator. A step back now counts as nothing. The readings already in your
+history are corrected the first time this version opens it, and the real time
+underneath them is kept. Alerts were never affected.
+
 # Idlewild 1.2.1
 
 A process that had stopped running away stayed listed as running away.
