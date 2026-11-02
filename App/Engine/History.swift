@@ -42,6 +42,27 @@ struct Slice: Codable {
         for (k, v) in s.apps { apps[k, default: 0] += v }
     }
 
+    /// 2^64 ns in seconds: 584 years, what an unsigned subtraction wraps to.
+    static let wrap = Double(UInt64.max) / 1e9
+
+    /// Takes out what earlier versions filed whenever a process's CPU counter
+    /// stepped back: one wrap per step. No slice really holds half of one, so
+    /// whole wraps are subtracted and what is left is the app's real time.
+    /// Returns how many values it changed.
+    mutating func removeWraps() -> Int {
+        func unwrapped(_ v: Double) -> Double {
+            max(v - (v / Self.wrap).rounded() * Self.wrap, 0)
+        }
+        var changed = 0
+        for (k, v) in apps where v >= Self.wrap / 2 {
+            let real = unwrapped(v)
+            if real > 0 { apps[k] = real } else { apps.removeValue(forKey: k) }
+            changed += 1
+        }
+        if other >= Self.wrap / 2 { other = unwrapped(other); changed += 1 }
+        return changed
+    }
+
     /// Keeps the `n` biggest apps and folds the rest into `other`. The long
     /// tail is dozens of daemons using a few milliseconds each; nobody reads
     /// the history for them, and they would triple its size.
@@ -164,13 +185,25 @@ final class CPUHistory: @unchecked Sendable {
         }
         fine = s.fine
         coarse = s.coarse
+        var stored = s.open
+        // Earlier versions filed 584 years of CPU whenever a process's counter
+        // stepped back (see Detector.scan). Taken out once, and saved so.
+        var repaired = 0
+        for i in fine.indices { repaired += fine[i].removeWraps() }
+        for i in coarse.indices { repaired += coarse[i].removeWraps() }
+        repaired += stored?.removeWraps() ?? 0
         // The slice open when the app last quit carries on if we are back
         // within it, and is closed otherwise: it simply ends early.
-        if let o = s.open {
+        if let o = stored {
             let current = (Date().timeIntervalSince1970 / Self.fineStep).rounded(.down) * Self.fineStep
             if o.start == current { open = o } else { close(o) }
         }
         prune(now: Date().timeIntervalSince1970)
+        if repaired > 0 {
+            log.notice("took \(repaired, privacy: .public) wrapped CPU readings out of the history")
+            dirty = true
+            save()
+        }
     }
 
     private func close(_ s: Slice) {

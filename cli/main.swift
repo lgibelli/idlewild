@@ -363,7 +363,9 @@ final class Detector {
                 continue
             }
 
-            let deltaNanos = s.cpuNanos &- t.lastCPU
+            // A process can read up to a millisecond of CPU time higher while it
+            // execs than a moment later; wrapping that step back is 584 years.
+            let deltaNanos = s.cpuNanos >= t.lastCPU ? s.cpuNanos - t.lastCPU : 0
             let pct = (Double(deltaNanos) / 1_000_000_000.0) / dt * 100.0
             t.lastCPU = s.cpuNanos
             t.lastFootprint = s.footprint
@@ -615,7 +617,7 @@ func cmdScan() {
     var rows: [(pct: Double, pid: pid_t, mb: Double)] = []
     for pid in lister.list() {
         guard let s = sampleProc(pid), let p0 = first[pid] else { continue }
-        let pct = Double(s.cpuNanos &- p0) / 1_000_000_000.0 / dt * 100.0
+        let pct = Double(s.cpuNanos >= p0 ? s.cpuNanos - p0 : 0) / 1_000_000_000.0 / dt * 100.0
         if pct > 0.5 { rows.append((pct, pid, Double(s.footprint) / 1_048_576.0)) }
     }
     rows.sort { $0.pct > $1.pct }

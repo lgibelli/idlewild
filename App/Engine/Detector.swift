@@ -311,7 +311,10 @@ final class Detector: @unchecked Sendable {
                 continue
             }
 
-            let used = s.cpuNanos &- t.lastCPU
+            // A process can read up to a millisecond of CPU time higher while it
+            // execs than a moment later, same pid and start time. Wrapping that
+            // step back filed 584 years of CPU under xpcproxy_sim; it is nothing.
+            let used = s.cpuNanos >= t.lastCPU ? s.cpuNanos - t.lastCPU : 0
             if accounting { charge(pid, &t, nanos: used) }
             let pct = (Double(used) / 1e9) / dt * 100.0
             t.lastCPU = s.cpuNanos
