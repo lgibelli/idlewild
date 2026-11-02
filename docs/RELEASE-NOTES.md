@@ -1,3 +1,15 @@
+# Idlewild 1.2.3
+
+CPU History files a program's time under its own name, not under the program
+that started it.
+
+Some programs start others by turning into them: the launcher macOS uses for
+background services, xpcproxy_sim in the iOS Simulator, a shell running exec. If
+Idlewild first saw such a process in the instant before it turned, everything it
+did afterwards was filed under the launcher; an app in the iOS Simulator put
+hours under xpcproxy_sim this way. A process that young is now named again once
+it has settled. Time already in your history stays where it was filed.
+
 # Idlewild 1.2.2
 
 CPU History no longer shows a process using centuries of CPU.
