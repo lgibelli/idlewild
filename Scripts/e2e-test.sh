@@ -96,7 +96,11 @@ grep -B1 "pid $GROWER" "$LOG" | grep -q "RUNAWAY" && check 1 "grower was reporte
 # files time. A launcher that execs into a busy program must leave the time
 # under the program (an iOS Simulator app once filed hours under xpcproxy_sim),
 # and a stored history with wrapped readings in it must come back with the real
-# time kept and 584-year wraps gone.
+# time kept and 584-year wraps gone. And the machine as a whole: a spinner on
+# every core is eight processes none of which is the problem, so it is the
+# machine that has to be reported busy, with the spinner named as the reason.
+# And when the swapping counts as heavy, decided on running totals made up for
+# it: a test cannot make a Mac swap without hurting it.
 echo "checking the app's CPU accounting..."
 # The burner shares the spinner's name; left running it would blur the figures.
 kill -9 "$BURNER" "$GROWER" 2>/dev/null; BURNER=""; GROWER=""
@@ -125,6 +129,99 @@ func execNaming(_ spinner: String) -> Bool {
     print(String(format: "  launcher seen: %@; then spinner %.2f s, perl %.3f s",
                  early["perl"] != nil ? "yes" : "no", spun, perl))
     return early["perl"] != nil && spun > 0.5 && perl < 0.1
+}
+
+/// The sustain window is -sustainMinutes on the command line, which
+/// UserDefaults reads without anything being written.
+func machineLoad(_ spinner: String) -> Bool {
+    let settings = AppSettings()
+    let d = Detector(settings: settings)
+    let window = settings.sustainSeconds
+    Thread.sleep(forTimeInterval: 0.1)
+    _ = d.scan()
+    let began = Date()
+    let burners = (0..<HostCPU.cores).map { _ -> Process in
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: spinner)
+        try! p.run()
+        return p
+    }
+    defer { burners.forEach { kill($0.processIdentifier, SIGKILL) } }
+
+    let named = { (l: MachineLoad?) in l?.top.first { $0.name == "idlewild_test_spinner" } }
+    var early = false                        // called busy before a whole window was in
+    var found: (load: MachineLoad, share: MachineLoad.Share, said: String, after: TimeInterval)?
+    for _ in 0..<Int(window) + 15 {
+        Thread.sleep(forTimeInterval: 1)
+        _ = d.scan()
+        let t = Date().timeIntervalSince(began)
+        if d.load != nil, t < window - 0.5 { early = true }
+        if let l = d.load, let s = named(l) { found = (l, s, l.summary, t); break }
+    }
+    guard let found else { print("  the machine was never reported busy"); return false }
+
+    burners.forEach { kill($0.processIdentifier, SIGKILL) }
+    let stopped = Date()
+    var gone: TimeInterval?                  // the machine may well stay busy; the spinner may not
+    for _ in 0..<Int(window) + 15 {
+        Thread.sleep(forTimeInterval: 1)
+        _ = d.scan()
+        if named(d.load) == nil { gone = Date().timeIntervalSince(stopped); break }
+    }
+    print(String(format: "  %@, said after %.0f s; spinners %.1f cores; out of it %@",
+                 found.said, found.after, found.share.cores,
+                 gone.map { String(format: "%.0f s after they stopped", $0) } ?? "never"))
+    let of = Double(found.load.of)
+    return !early && found.load.cores >= of * Detector.busyAt && found.load.cores <= of * 1.05
+        && found.share.cores >= of / 4 && gone != nil
+}
+
+/// Swap traffic at a steady rate, scanned every 30 s, half of it read back.
+struct SwapSim {
+    var w = SwapWatch()
+    var t = 1000.0, moved = 0.0, read = 0.0
+    init() { w.add(at: t, moved: 0, readBack: 0) }   // the first scan, which only learns the totals
+    mutating func run(_ seconds: Double, mbps: Double) -> [Bool] {
+        var seen: [Bool] = []
+        for _ in 0..<Int(seconds / 30) {
+            t += 30
+            moved += mbps * 30 * 1_048_576
+            read += mbps * 15 * 1_048_576
+            seen.append(w.add(at: t, moved: UInt64(moved), readBack: UInt64(read)))
+        }
+        return seen
+    }
+}
+
+func swapDecision() -> Bool {
+    var ok = true
+    func expect(_ c: Bool, _ what: String) { if !c { print("  wrong: " + what); ok = false } }
+
+    var a = SwapSim()
+    expect(!a.run(570, mbps: 20).contains(true), "heavy before a whole window was in")
+    expect(a.run(30, mbps: 20) == [true], "not heavy after ten minutes at 20 MB/s")
+    expect(a.w.since == 1000, "the episode does not start where the window did")
+    expect(abs(a.w.rate / 1_048_576 - 20) < 0.01 && abs(a.w.readBack / 1_048_576 - 10) < 0.01,
+           "the rates are not what was moved")
+    expect(!a.run(300, mbps: 0).contains(false), "cleared while the average was still 10 MB/s")
+    expect(a.run(300, mbps: 0).last == false, "still heavy after ten minutes of nothing")
+
+    var b = SwapSim()                            // an app swapped out overnight, woken
+    _ = b.run(30, mbps: 2048.0 / 30)             // 2 GB read back at once
+    expect(!b.run(1200, mbps: 0.2).contains(true), "a single 2 GB restore was called heavy")
+
+    var c = SwapSim()                            // sitting between the two thresholds
+    expect(!c.run(1200, mbps: 3).contains(true), "3 MB/s was called heavy")
+    _ = c.run(600, mbps: 8)
+    expect(!c.run(1200, mbps: 3).contains(false), "3 MB/s ended an episode that started higher")
+
+    var d = SwapSim()
+    _ = d.run(600, mbps: 20)
+    d.moved = 0; d.read = 0                      // the totals started again
+    expect(d.run(30, mbps: 20) == [false], "a counter that went back was not a fresh start")
+
+    print("  swap decision: " + (ok ? "as expected" : "wrong"))
+    return ok
 }
 
 struct Stored: Codable { var version = 1; var fine: [Slice]; var coarse: [Slice]; var open: Slice? }
@@ -156,7 +253,9 @@ let a = CommandLine.arguments
 switch a.count > 2 ? a[1] : "" {
 case "exec":  exit(execNaming(a[2]) ? 0 : 1)
 case "wraps": exit(wraps(a[2]) ? 0 : 1)
-default:      print("usage: engine-test exec SPINNER | wraps DIR"); exit(2)
+case "busy":  exit(machineLoad(a[2]) ? 0 : 1)
+case "swap":  exit(swapDecision() ? 0 : 1)
+default:      print("usage: engine-test exec SPINNER | wraps DIR | busy SPINNER | swap -"); exit(2)
 }
 SWIFT
 swiftc -swift-version 5 -target arm64-apple-macos14.0 -o "$WORK/engine-test" \
@@ -166,6 +265,10 @@ swiftc -swift-version 5 -target arm64-apple-macos14.0 -o "$WORK/engine-test" \
 check $? "a launched program's CPU is filed under its own name, not the launcher's"
 "$WORK/engine-test" wraps "$WORK"
 check $? "a stored history loses its wrapped readings and keeps the real time"
+"$WORK/engine-test" busy "$WORK/idlewild_test_spinner" -sustainMinutes 0.1
+check $? "a machine kept busy by many processes is reported busy, and the spinner named for it"
+"$WORK/engine-test" swap -
+check $? "heavy swapping is told from a one-off restore, and an episode ends only once it has eased"
 
 echo
 echo "--- watch output ---"; sed 's/^/  /' "$LOG" | head -30

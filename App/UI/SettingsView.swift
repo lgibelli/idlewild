@@ -233,7 +233,7 @@ private struct CPUPane: View {
 private struct MemoryPane: View {
     @ObservedObject var monitor: Monitor
     @State private var enabled = true
-    @State private var share: Double = 50
+    @State private var share: Double = 10
     @State private var sustain: Double = 10
     @State private var fillHours: Double = 12
 
@@ -243,7 +243,7 @@ private struct MemoryPane: View {
                 ? "Alert me when a process uses more than **\(Int(share))%** of memory (\(shareText)), "
                   + "has been growing steadily for **\(minutes(sustain))**, and at that rate would fill "
                   + "memory within **\(Int(fillHours)) hour\(Int(fillHours) == 1 ? "" : "s")**. "
-                  + "Also name the largest process when the machine starts swapping."
+                  + "Also warn when the Mac has been swapping heavily for ten minutes, and say which apps hold the memory."
                 : "Memory is not being watched.")
 
             GroupBox {

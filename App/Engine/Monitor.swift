@@ -23,6 +23,20 @@ final class Monitor: ObservableObject {
     /// Mirrors the setting so the label can read it without observing
     /// UserDefaults. Changes only when the user flips the switch.
     @Published private(set) var colouredIcon = false
+    /// The whole machine's CPU while it is busy, nil the rest of the time. It
+    /// changes what the menu says and nothing else, and is republished once a
+    /// minute at most while it lasts, for the reason above. See show.
+    @Published private(set) var load: MachineLoad?
+    private var loadShown = Date.distantPast
+    /// Set while the Mac is swapping heavily, refreshed as the load is. Unlike
+    /// the load this is a warning: it is posted, and it lights the icon until
+    /// it clears or the user says to leave it.
+    @Published private(set) var swapping: Swapping?
+    @Published private(set) var swappingIgnored = false
+    private var swappingShown = Date.distantPast
+
+    /// What the icon shows a flame for.
+    var isAlarmed: Bool { !incidents.isEmpty || (swapping != nil && !swappingIgnored) }
 
     private(set) var lastScan: Date?
     private(set) var ownCPUms: Double = 0
@@ -62,6 +76,8 @@ final class Monitor: ObservableObject {
 
     func pause() {
         isPaused = true
+        if load != nil { load = nil }
+        endSwapping()
         timer?.cancel()
         timer = nil
         pressureSource?.cancel()
@@ -102,6 +118,8 @@ final class Monitor: ObservableObject {
         let found = detector.scan()
         let suspect = detector.hasActiveSuspect
         let ongoing = detector.ongoing
+        let load = detector.load
+        let swapping = detector.swapping
         history.record(detector.takeUsage())
 
         // Diagnosis is expensive, so it happens here on the utility queue,
@@ -121,6 +139,8 @@ final class Monitor: ObservableObject {
             self.lastScan = Date()
             self.refreshOwnCost()
             self.resolve(keeping: ongoing)
+            self.show(load)
+            self.show(swapping)
             for i in enriched {
                 if let rule = i.autoQuit {
                     self.autoQuit(i, rule)
@@ -149,6 +169,67 @@ final class Monitor: ObservableObject {
             log.notice("resolved: \(i.name, privacy: .public) pid \(i.pid) is no longer running away")
             Notifier.withdraw(pid: i.pid)
         }
+    }
+
+    /// The machine being busy is a state, not an incident: nothing is posted
+    /// and the icon stays as it is. The menu says so while it lasts, with
+    /// figures at most a minute old, which for an average over the sustain
+    /// window is as fresh as they can be read anyway.
+    private func show(_ now: MachineLoad?) {
+        // A scan already under way when monitoring was paused lands here after it.
+        guard !isPaused else { return }
+        guard let now else {
+            if load != nil {
+                load = nil
+                log.notice("the CPU is no longer busy")
+            }
+            return
+        }
+        let began = load == nil
+        guard began || Date().timeIntervalSince(loadShown) >= 60 else { return }
+        load = now
+        loadShown = Date()
+        if began {
+            let top = now.top.map(\.text).joined(separator: ", ")
+            log.notice("the CPU is busy: \(now.summary, privacy: .public); \(top, privacy: .public)")
+        }
+    }
+
+    /// Posted once when it begins and taken back when it ends, as an incident
+    /// is; in between the menu's figures are at most a minute old.
+    private func show(_ now: Swapping?) {
+        guard !isPaused else { return }
+        guard let now else {
+            if swapping != nil {
+                log.notice("no longer swapping heavily")
+                endSwapping()
+            }
+            return
+        }
+        let began = swapping == nil
+        guard began || Date().timeIntervalSince(swappingShown) >= 60 else { return }
+        swapping = now
+        swappingShown = Date()
+        if began {
+            let top = now.top.map(\.text).joined(separator: ", ")
+            log.notice("swapping heavily: \(now.headline, privacy: .public); \(top, privacy: .public)")
+            Notifier.post(swapping: now, enabled: settings.notificationsEnabled)
+        }
+    }
+
+    private func endSwapping() {
+        if swapping != nil { swapping = nil }
+        if swappingIgnored { swappingIgnored = false }
+        Notifier.withdrawSwapping()
+    }
+
+    /// Stops the flame and takes back the notification until this episode is
+    /// over. The menu still says the Mac is swapping, because it still is.
+    func ignoreSwapping() {
+        guard swapping != nil else { return }
+        swappingIgnored = true
+        Notifier.withdrawSwapping()
+        log.notice("swapping warning ignored until it clears")
     }
 
     /// Carries out an "Always Force Quit" rule. If the process cannot be

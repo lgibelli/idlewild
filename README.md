@@ -9,7 +9,8 @@ for long enough to be a bug.
 
 The menu bar icon is an ECG trace while everything is quiet, and a flame once
 something is detected. Each detected process gets a submenu with the cause and
-the actions worth taking.
+the actions worth taking. When it is the machine as a whole that is busy, with
+no one process to blame, the menu says that instead of saying nothing.
 
 It was written after a Safari tab spent nine and a half hours pegging a core on
 a fanless MacBook Air, entirely unnoticed.
@@ -39,8 +40,18 @@ evidence in it:
 > memory climbing in a straight line for 25 min, usually a leak; at this rate
 > it fills memory in 3.1 hours
 
-and when the kernel reports memory pressure, Idlewild names the single largest
-process that is not on the allowlist, whether or not it is growing.
+and when the Mac keeps running out of memory, it says so, and says where the
+memory is:
+
+> Swapping 4.1 MB/s for 10 min
+> node — 7.7 GB in 21 processes
+> java — 6.9 GB in 2 processes
+> Safari & WebKit — 6.8 GB in 20 processes
+> Google Chrome — 3.2 GB in 29 processes
+
+That is a 16 GB Mac, and not one of those processes holds half of it. An app's
+figure counts what of it has been compressed or swapped out, which is why
+together they come to more than the Mac has.
 
 ## The design constraint
 
@@ -100,7 +111,7 @@ A footprint is called a leak only when *all* of these hold:
 
 | clause | what it removes |
 |---|---|
-| holds more than a share of physical RAM (default 50%) | everything that is not hurting anyone yet |
+| holds more than a share of physical RAM (default 10%) | small processes, which cost a history each to watch |
 | the fit spans the sustain window (default 10 min) with at least six points | a burst, or a process that just started |
 | positive slope, r² ≥ 0.85 | staircases (loaded a file, stopped) and sawtooths (allocate, collect) |
 | grown by ≥ 32 MB *and* ≥ 5% of its own size | noise, which is proportional to size |
@@ -108,14 +119,37 @@ A footprint is called a leak only when *all* of these hold:
 | at the fitted rate, fills the rest of memory within the horizon (default 12 h) | a 16 GB process gaining 5 MB/min on a 64 GB machine, which fills it in a week |
 
 The share is relative to the machine because 6 GB is fine on a 64 GB Studio and
-fatal on an 8 GB Air. A drop of more than 10% from the peak clears the history:
-a process that frees memory is not leaking it.
+fatal on an 8 GB Air. It used to default to half, and a leak had done most of
+its damage by the time it got there; what keeps honest growth from being called
+a leak is the fit and the fill horizon, not the size. A drop of more than 10%
+from the peak clears the history: a process that frees memory is not leaking it.
 
-Separately, a memory pressure dispatch source lets the kernel wake Idlewild
-when the machine starts swapping — there is no polling — and it names the
-largest process above the share threshold that is not allowlisted. One process
-per pressure episode; the next may be named only once pressure has cleared or
-that one has gone.
+### Swapping
+
+A Mac rarely runs out of memory because one process holds half of it. It runs
+out because a browser, an editor, a build and a dozen other things each hold a
+gigabyte or two. Earlier versions named a culprit under memory pressure only if
+a single process held more than the share threshold, so on a 16 GB Mac swapping
+twenty megabytes a second, with no one process above 8 GB, they said nothing.
+
+What the machine feels when memory runs out is swap traffic: every page read
+back from swap is a stall in whatever needed it, and every page written out is
+the working set not fitting. So that is what Idlewild measures, from the
+system's own running totals, one Mach call a scan. How much swap is in use says
+little on its own; pages nobody touches can sit there for a week at no cost.
+
+When the traffic has averaged 4 MB/s or more over ten minutes, which is 2.4 GB
+moved, Idlewild posts a warning, lights the icon, and lists the apps holding the
+most memory: every process of an app added up under the name CPU History uses,
+whatever its size. A Mac with room to spare moves almost nothing; the one this
+was measured on, out of room, moved 21 MB/s for half an hour. Waking an app that
+was swapped out overnight reads a gigabyte or two back once, and ten minutes of
+averaging leaves that out. The warning lasts until the average falls under
+2 MB/s, so a machine sitting on the line is one warning, not twenty, and Ignore
+Until It Stops puts the icon out without pretending the swapping has stopped.
+
+The memory pressure dispatch source still lets the kernel wake Idlewild when
+pressure rises, so the figures are fresh when it matters; there is no polling.
 
 Memory incidents offer Force Quit but not Pause It: a stopped process keeps
 every byte, so pausing would leave you exactly where you were.
@@ -140,6 +174,37 @@ and posts a silent notification saying it did. Only an app can honestly be
 reopened; anything else was started by something with its own arguments and
 environment, and the prompt says so instead of guessing. Rules match the exact
 executable path and are listed in Settings → Exceptions.
+
+## A busy machine with nothing running away
+
+Every core can be in use with no process running away. A dozen programs each
+well under the threshold add up; so do a build and a test run made of hundreds
+of processes that live a few seconds each. None of them is an incident, and
+Idlewild raises none. But a menu that says "Nothing running away" and stops
+there, on a machine like that, reads as "all is well".
+
+So once the machine has averaged half its cores in use over the sustain window,
+the menu says so, and where the CPU is going:
+
+> Nothing running away, but the CPU is busy
+>
+> 6.2 of 8 cores in use for 12 min
+> node — 2.3 cores
+> System & short-lived processes — 2.1 cores
+> Google Chrome — 0.6 cores
+
+That is all it does. There is no notification and no flame, because there is no
+process to stop and a build is supposed to do this; which is also why the bar
+can sit at half rather than at full. Load that comes in bursts pins every core
+for half a minute at a time and averages two thirds. The lines go once the
+average falls under four tenths of the cores, and with CPU watching switched
+off they never appear.
+
+It costs no measurement. The machine's busy time and each app's share of it are
+what CPU History is already handed on every scan; this keeps the last sustain
+window of them. "System & short-lived processes" is what the history draws as
+System & kernel, named here for what most of it is on a machine that is
+building: programs that started and finished between two scans.
 
 ## Where the CPU went
 

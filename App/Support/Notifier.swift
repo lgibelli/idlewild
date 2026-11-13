@@ -21,6 +21,11 @@ enum Notifier {
     static let categoryID = "it.salamacchine.idlewild.runaway"
     /// Pausing frees no memory, so a memory notification offers no Pause It.
     static let memoryCategoryID = "it.salamacchine.idlewild.memory"
+    /// The Mac swapping is nobody's process, so there is nothing to quit or
+    /// pause from here; only to leave it be until it clears.
+    static let swappingCategoryID = "it.salamacchine.idlewild.swapping"
+    /// One slot: the Mac is swapping or it is not.
+    static let swappingNotificationID = "swapping"
     enum Action: String {
         case kill = "KILL"
         case suspend = "SUSPEND"
@@ -62,7 +67,12 @@ enum Notifier {
         let memory = UNNotificationCategory(identifier: memoryCategoryID,
                                             actions: [kill] + snoozeActions,
                                             intentIdentifiers: [], options: [])
-        c.setNotificationCategories([category, memory])
+        let swapping = UNNotificationCategory(
+            identifier: swappingCategoryID,
+            actions: [UNNotificationAction(identifier: Action.ignore.rawValue,
+                                           title: "Ignore Until It Stops", options: [])],
+            intentIdentifiers: [], options: [])
+        c.setNotificationCategories([category, memory, swapping])
         withdrawLeftovers()
         c.requestAuthorization(options: [.alert, .sound]) { granted, error in
             Task { @MainActor in
@@ -130,12 +140,49 @@ enum Notifier {
     static func withdrawLeftovers() {
         let c = UNUserNotificationCenter.current()
         c.getDeliveredNotifications { delivered in
-            let stale = delivered.map(\.request.identifier).filter { $0.hasPrefix("runaway-") }
+            let stale = delivered.map(\.request.identifier).filter {
+                $0.hasPrefix("runaway-") || $0 == swappingNotificationID
+            }
             if !stale.isEmpty {
                 c.removeDeliveredNotifications(withIdentifiers: stale)
                 nlog.notice("withdrew \(stale.count) notifications left from a previous run")
             }
         }
+    }
+
+    static func post(swapping: Swapping, enabled: Bool) {
+        guard enabled else { return }
+        let n = UNMutableNotificationContent()
+        n.title = "Your Mac is swapping heavily"
+        n.subtitle = swapping.headline + ", " + formatBytes(swapping.used) + " of swap in use"
+        let held = swapping.top.prefix(3).map {
+            "\($0.name) (\(formatBytes($0.bytes))\($0.processes > 1 ? " in \($0.processes) processes" : ""))"
+        }
+        n.body = held.isEmpty
+            ? "Memory has run short and the Mac is using its disk instead."
+            : "Memory has run short. Holding the most: " + listed(held) + "."
+        n.categoryIdentifier = swappingCategoryID
+        n.sound = .default
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: swappingNotificationID, content: n, trigger: nil)) { error in
+                if let error {
+                    nlog.error("post failed: \(error.localizedDescription, privacy: .public)")
+                } else {
+                    nlog.notice("posted the swapping warning")
+                }
+            }
+    }
+
+    static func withdrawSwapping() {
+        let c = UNUserNotificationCenter.current()
+        c.removePendingNotificationRequests(withIdentifiers: [swappingNotificationID])
+        c.removeDeliveredNotifications(withIdentifiers: [swappingNotificationID])
+    }
+
+    /// "a", "a and b", "a, b and c".
+    private static func listed(_ items: [String]) -> String {
+        guard items.count > 1 else { return items.first ?? "" }
+        return items.dropLast().joined(separator: ", ") + " and " + items[items.count - 1]
     }
 
     /// Reports what an "Always Force Quit" rule did. Silent, with no actions:

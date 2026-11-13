@@ -97,6 +97,151 @@ func formatDuration(_ t: TimeInterval) -> String {
     return String(format: "%.1f hours", t / 3600)
 }
 
+/// The whole machine's CPU, as opposed to any one process's. A dozen programs
+/// each well under the threshold, or hundreds that start and finish between two
+/// scans, keep a Mac's cores busy as thoroughly as one runaway does, and none
+/// of them is an incident. Nor is this: there is no process to stop. But a menu
+/// that said "Nothing running away" and stopped there, on a machine with every
+/// core in use, read as "all is well".
+struct MachineLoad {
+    struct Share {
+        let name: String
+        /// Cores in use, averaged over the window.
+        let cores: Double
+
+        var text: String { String(format: "%@ \u{2014} %.1f cores", name, cores) }
+    }
+
+    /// Cores in use, averaged over the sustain window.
+    let cores: Double
+    let of: Int
+    /// The start of the first window that came out busy.
+    let since: Date
+    /// Where it is going, largest first. Short: this is a menu, and CPU History
+    /// has the rest.
+    let top: [Share]
+
+    /// CPU time no process could be named for: what belongs to root, to other
+    /// users or to the kernel, and what was used by programs that started and
+    /// finished between two scans. CPU History draws it as System & kernel; on
+    /// a machine that is building or running tests most of it is the second
+    /// kind, and here it is one line of four, so it says so.
+    static let unattributed = "System & short-lived processes"
+
+    var heldFor: TimeInterval { Date().timeIntervalSince(since) }
+
+    var summary: String {
+        String(format: "%.1f of %d cores in use for %@", min(cores, Double(of)), of,
+               formatDuration(heldFor))
+    }
+}
+
+/// The Mac moving memory to and from swap faster than it can afford to. Every
+/// page read back from swap is a stall in whatever needed it, and every page
+/// written out is the working set not fitting in memory. Like MachineLoad this
+/// is about the machine and not one process: a dozen apps of a gigabyte or two
+/// each fill a Mac's memory as thoroughly as one runaway does, and none of them
+/// is the problem on its own. So it names the apps holding the memory, all of
+/// a browser's or a build's processes added up, however small each one is.
+struct Swapping {
+    struct Holder {
+        let name: String
+        let bytes: UInt64
+        let processes: Int
+
+        var text: String {
+            "\(name) \u{2014} \(formatBytes(bytes))" + (processes > 1 ? " in \(processes) processes" : "")
+        }
+    }
+
+    /// Bytes a second moved to or from swap, averaged over the window, and how
+    /// much of it was read back.
+    let rate: Double
+    let readBack: Double
+    /// Swap in use now.
+    let used: UInt64
+    /// The start of the first window that came out heavy.
+    let since: Date
+    /// The apps holding the most memory, largest first.
+    let top: [Holder]
+
+    var heldFor: TimeInterval { Date().timeIntervalSince(since) }
+
+    var rateText: String { Self.rate(rate) }
+
+    static func rate(_ bytesPerSecond: Double) -> String {
+        let mb = bytesPerSecond / 1_048_576
+        return String(format: mb < 10 ? "%.1f MB/s" : "%.0f MB/s", mb)
+    }
+
+    /// "Swapping 21 MB/s for 12 min"
+    var headline: String { "Swapping \(rateText) for \(formatDuration(heldFor))" }
+
+    var details: [String] {
+        ["\(Self.rate(readBack)) read back from swap and \(Self.rate(max(rate - readBack, 0))) written to it, on average",
+         "\(formatBytes(used)) of swap in use, on a Mac with \(formatBytes(HostMemory.physical)) of memory",
+         // Otherwise the apps below add up to more than the Mac has, and look wrong.
+         "What each app holds includes what of it has been compressed or swapped out"]
+    }
+}
+
+/// Decides when the swapping is heavy, from the system's running totals of
+/// what it has moved to and from swap. Kept apart from the detector, which
+/// reads the totals, so the decision can be tested on totals made up for it.
+struct SwapWatch {
+    /// Heavy is an average over ten minutes, so the cost of waking an app
+    /// that was swapped out overnight, a gigabyte or two read back once, is
+    /// not mistaken for a machine that keeps running out of memory.
+    static let window: TimeInterval = 600
+    /// 4 MB/s is 2.4 GB moved in the window. A Mac with room to spare moves
+    /// almost nothing; one that has run out moves tens of megabytes a second
+    /// for as long as it stays out. It stays heavy until the average falls
+    /// under half that, so a machine sitting on the line is one episode.
+    static let heavyAt: Double = 4 * 1_048_576
+    static let easedAt: Double = 2 * 1_048_576
+
+    private struct Point { let t: TimeInterval; let moved: UInt64; let readBack: UInt64 }
+    private var points: [Point] = []
+    private(set) var since: TimeInterval?
+    private(set) var rate: Double = 0
+    private(set) var readBack: Double = 0
+
+    mutating func reset() {
+        points.removeAll()
+        since = nil
+        rate = 0
+        readBack = 0
+    }
+
+    /// Takes the running totals at time t, in bytes. Returns whether the
+    /// swapping is heavy now.
+    @discardableResult
+    mutating func add(at t: TimeInterval, moved: UInt64, readBack read: UInt64) -> Bool {
+        // Totals only grow. One that went down is a counter that started
+        // again, and nothing before it can be compared with what follows.
+        if let last = points.last, t <= last.t || moved < last.moved || read < last.readBack {
+            reset()
+        }
+        points.append(Point(t: t, moved: moved, readBack: read))
+        // Keep one point at or before the start of the window, so the average
+        // always covers all of it.
+        while points.count > 2, points[1].t <= t - Self.window { points.removeFirst() }
+        guard let first = points.first, t - first.t >= Self.window else {
+            since = nil
+            return false
+        }
+        let span = t - first.t
+        rate = Double(moved - first.moved) / span
+        readBack = Double(read - first.readBack) / span
+        if rate >= Self.heavyAt {
+            if since == nil { since = first.t }
+        } else if rate < Self.easedAt {
+            since = nil
+        }
+        return since != nil
+    }
+}
+
 private struct MemPoint {
     let t: Double        // seconds, timeIntervalSinceReferenceDate
     let bytes: UInt64
@@ -174,7 +319,6 @@ private struct Track {
     var memStoredAt: Double = -.infinity
     var memPeak: UInt64 = 0
     var memAlerted = false
-    var pressureAlerted = false
 
     /// The name the history files this process's CPU time under, resolved the
     /// first time it uses any.
@@ -209,32 +353,46 @@ final class Detector: @unchecked Sendable {
     private var pathCache: [pid_t: String] = [:]
     private var lastScan = Date()
     private let selfPID = getpid()
-    /// The process named for the current pressure episode. One alarm per
-    /// episode: naming the next-largest process on every scan for as long as
-    /// the machine swaps would be a list, not an alarm. A new one may be named
-    /// only once pressure has cleared or the named process has gone.
-    private var pressureNamed: pid_t?
+    private var swapWatch = SwapWatch()
+    /// Set while the Mac is swapping heavily. See Swapping.
+    private(set) var swapping: Swapping?
 
     /// CPU time used since the last takeUsage(), by app, for the history. The
     /// deltas are computed for detection anyway; filing them costs a dictionary
     /// update per busy process per scan.
     private var usage = Usage()
+    /// The same, for the scan in progress alone.
+    private var scanned = Usage()
     private var lastHostTicks: HostCPU.Ticks?
+
+    /// The last sustain window of CPU time, in about ten pieces however often
+    /// the scans come, and what it adds up to. See weigh.
+    private var recent: [Usage] = []
+    private var busySince: Date?
+    private(set) var load: MachineLoad?
 
     var settings: AppSettings
 
     init(settings: AppSettings) { self.settings = settings }
 
     /// Something is building towards an alert, so the caller should scan more
-    /// often. A rising footprint counts only once it is large enough to matter;
-    /// at any moment *something* on a Mac is growing, and tightening the cadence
-    /// for all of them would spend the CPU budget on nothing.
+    /// often. A rising footprint counts only once it is large enough to matter,
+    /// and only while it rises fast enough to be reported: at the rate of its
+    /// last step it would fill memory within the horizon. At any moment
+    /// *something* on a Mac is growing, and a Gradle daemon of 5 GB putting on
+    /// a few hundred kilobytes a minute would otherwise hold the cadence tight
+    /// for as long as it ran, spending the CPU budget on nothing.
     var hasActiveSuspect: Bool {
         let limit = settings.memoryEnabled ? settings.memoryThresholdBytes : UInt64.max
+        let horizon = settings.memoryFillHours * 3600
+        let physical = HostMemory.physical
         return tracks.values.contains { t in
             if t.overSince != nil { return true }
             guard t.lastFootprint >= limit, t.mem.count >= 2 else { return false }
-            return t.mem[t.mem.count - 1].bytes > t.mem[t.mem.count - 2].bytes
+            let a = t.mem[t.mem.count - 2], b = t.mem[t.mem.count - 1]
+            guard b.bytes > a.bytes, b.t > a.t, physical > b.bytes else { return false }
+            let rate = Double(b.bytes - a.bytes) / (b.t - a.t)
+            return Double(physical - b.bytes) / rate <= horizon
         }
     }
 
@@ -261,6 +419,15 @@ final class Detector: @unchecked Sendable {
     /// again later; without that, a Simulator app first seen in that instant
     /// filed hours of its CPU under xpcproxy_sim.
     static let launcherWindow: UInt64 = 1_000_000_000
+
+    /// The machine is busy once the sustain window averages half its cores in
+    /// use, and stays so until that drops under four tenths, so a load sitting
+    /// on the line is one busy spell and not twenty. Half is deliberately well
+    /// short of full: load that comes in bursts, a test run and then a build,
+    /// pins every core for half a minute at a time and averages two thirds.
+    /// It can afford to be generous because it only changes what the menu says.
+    static let busyAt = 0.5
+    static let easedAt = 0.4
 
     /// Processes whose incident is still true: running away, allowing for
     /// brief dips, or still holding the memory they were reported for. Monitor
@@ -296,20 +463,20 @@ final class Detector: @unchecked Sendable {
 
         var incidents: [Incident] = []
         var seen = Set<pid_t>()
-        var hogs: [(pid: pid_t, sample: ProcSample)] = []
 
         // The first scan only learns where every counter stands. After that a
         // process with no track was born since the last scan, so all the CPU
         // it has ever used falls inside this window.
         let primed = !tracks.isEmpty
         let accounting = primed && dt <= Self.longestAccountedGap
+        scanned = Usage()
         if let host = HostCPU.busyTicks() {
             if accounting, let last = lastHostTicks {
-                usage.busy += HostCPU.seconds(from: last, to: host)
+                scanned.busy = HostCPU.seconds(from: last, to: host)
             }
             lastHostTicks = host
         }
-        if accounting { usage.span += dt }
+        if accounting { scanned.span = dt }
 
         for pid in lister.list() {
             guard pid > 0, let s = sampleProc(pid) else { continue }
@@ -391,7 +558,6 @@ final class Detector: @unchecked Sendable {
                     }
                     t.memPeak = max(t.memPeak, s.footprint)
                 }
-                if !pressure.isElevated { t.pressureAlerted = false }
 
                 if s.footprint >= memLimit {
                     if !t.memAlerted, let fit = LeakFit(t.mem),
@@ -408,48 +574,9 @@ final class Detector: @unchecked Sendable {
                                      + "usually a leak; at this rate it fills memory in \(formatDuration(fills))"))
                         }
                     }
-                    if pressure.isElevated && !t.pressureAlerted && !t.memAlerted {
-                        hogs.append((pid, s))
-                    }
                 }
             }
             tracks[pid] = t
-        }
-
-        // Under pressure, name one culprit: the largest process that is not
-        // allowlisted. Naming every large process would be a list, not an alarm.
-        if !pressure.isElevated || (pressureNamed.map { !seen.contains($0) } ?? false) {
-            pressureNamed = nil
-        }
-        if pressure.isElevated && pressureNamed == nil {
-            for h in hogs.sorted(by: { $0.sample.footprint > $1.sample.footprint }) {
-                let path = cachedPath(h.pid)
-                guard !settings.isAllowed(path: path), !settings.isSnoozed(path: path) else { continue }
-                tracks[h.pid]?.pressureAlerted = true
-                tracks[h.pid]?.memAlerted = true
-                pressureNamed = h.pid
-                let track = tracks[h.pid]
-                let fit = track.flatMap { LeakFit($0.mem) }
-                let growing = (fit?.bytesPerSecond ?? 0) > 0 && (fit?.r2 ?? 0) >= 0.85
-                let fills = growing ? fit!.fillsIn(latest: h.sample.footprint, physical: HostMemory.physical) : nil
-                let leak = fit?.isLeak(sustain: memSustain, latest: h.sample.footprint,
-                                       peak: track?.memPeak ?? 0, physical: HostMemory.physical,
-                                       fillHours: memFillHours) ?? false
-                let cause: String
-                if leak {
-                    cause = "memory climbing in a straight line for \(formatDuration(fit!.span)), usually a leak, "
-                          + "and the machine is already low on memory; at this rate it fills memory in \(formatDuration(fills!))"
-                } else if growing {
-                    cause = "the machine is low on memory, and this process is the largest and still growing"
-                } else {
-                    cause = "the machine is low on memory, and this process is the largest"
-                }
-                incidents.append(memoryIncident(
-                    pid: h.pid, path: path, sample: h.sample,
-                    heldFor: fit?.span ?? 0, rate: growing ? fit!.mbPerMin : 0,
-                    fillsIn: fills, pressure: pressure, cause: cause))
-                break
-            }
         }
 
         if tracks.count > seen.count {
@@ -457,7 +584,112 @@ final class Detector: @unchecked Sendable {
             pathCache = pathCache.filter { seen.contains($0.key) }
         }
 
+        usage.add(scanned)
+        weigh(scanned, watching: watchCPU && accounting, at: now)
+        watchSwap(watching: watchMemory && accounting, at: now)
+
         return incidents
+    }
+
+    /// Below this a process is left out of the memory holders: there are
+    /// hundreds of them on a Mac, and naming each costs a path lookup.
+    static let holderFloor: UInt64 = 16 << 20
+
+    /// One Mach call a scan, and a look at every process's footprint, already
+    /// read, only while the swapping is heavy.
+    private func watchSwap(watching: Bool, at now: Date) {
+        // Asleep, paused, or memory not watched: the totals across the gap
+        // cannot be placed in time, and whatever was building is over.
+        guard watching, let traffic = HostMemory.swapTraffic() else {
+            swapWatch.reset()
+            swapping = nil
+            return
+        }
+        let heavy = swapWatch.add(at: now.timeIntervalSinceReferenceDate,
+                                  moved: traffic.in &+ traffic.out, readBack: traffic.in)
+        guard heavy, let since = swapWatch.since else {
+            swapping = nil
+            return
+        }
+        swapping = Swapping(rate: swapWatch.rate, readBack: swapWatch.readBack,
+                            used: HostMemory.swapUsed(),
+                            since: Date(timeIntervalSinceReferenceDate: since),
+                            top: memoryHolders())
+    }
+
+    /// The apps holding the most memory, each one's processes added up, so a
+    /// browser's forty helpers count as the browser. Filed under the same names
+    /// as CPU History's.
+    private func memoryHolders() -> [Swapping.Holder] {
+        var bytes: [String: UInt64] = [:]
+        var count: [String: Int] = [:]
+        for (pid, t) in tracks where t.lastFootprint >= Self.holderFloor {
+            guard let name = t.account ?? accountName(pid, cachedPath(pid)) else { continue }
+            bytes[name, default: 0] += t.lastFootprint
+            count[name, default: 0] += 1
+        }
+        var top: [Swapping.Holder] = []
+        for (name, b) in bytes {
+            top.append(Swapping.Holder(name: name, bytes: b, processes: count[name] ?? 1))
+        }
+        top.sort { a, b in a.bytes != b.bytes ? a.bytes > b.bytes : a.name < b.name }
+        return Array(top.prefix(4))
+    }
+
+    /// Adds a scan to the last sustain window and says whether the machine as
+    /// a whole has been busy for all of it. Costs no measurement: the host's
+    /// busy time and every process's share of it are what the history is
+    /// already handed.
+    private func weigh(_ u: Usage, watching: Bool, at now: Date) {
+        let window = settings.sustainSeconds
+        // A gap the CPU time cannot be placed in, or CPU watching switched
+        // off: whatever was building is over.
+        guard watching, u.span > 0, window > 0 else {
+            recent.removeAll()
+            busySince = nil
+            load = nil
+            return
+        }
+        if let last = recent.last, last.span < window / 10 {
+            recent[recent.count - 1].add(u)
+        } else {
+            recent.append(u)
+        }
+        var span = recent.reduce(0) { $0 + $1.span }
+        while recent.count > 1, span - recent[0].span >= window {
+            span -= recent[0].span
+            recent.removeFirst()
+        }
+        // Not a whole window yet: too little to call anything sustained.
+        guard span >= window else {
+            busySince = nil
+            load = nil
+            return
+        }
+
+        let busy = recent.reduce(0) { $0 + $1.busy }
+        let share = busy / span / Double(HostCPU.cores)
+        if share >= Self.busyAt {
+            if busySince == nil { busySince = now.addingTimeInterval(-span) }
+        } else if share < Self.easedAt {
+            busySince = nil
+        }
+        guard let since = busySince else {
+            load = nil
+            return
+        }
+
+        var by: [String: Double] = [:]
+        for r in recent { for (k, v) in r.seconds { by[k, default: 0] += v } }
+        let named = by.values.reduce(0, +)
+        by[MachineLoad.unattributed, default: 0] += max(0, busy - named)
+        var top: [MachineLoad.Share] = []
+        for (name, seconds) in by where seconds / span >= 0.1 {
+            top.append(MachineLoad.Share(name: name, cores: seconds / span))
+        }
+        top.sort { a, b in a.cores != b.cores ? a.cores > b.cores : a.name < b.name }
+        load = MachineLoad(cores: busy / span, of: HostCPU.cores, since: since,
+                           top: Array(top.prefix(4)))
     }
 
     private func memoryIncident(pid: pid_t, path: String, sample s: ProcSample,
@@ -490,7 +722,7 @@ final class Detector: @unchecked Sendable {
                 && absToNanos(mach_absolute_time() &- t.startAbs) < Self.launcherWindow
         }
         guard let name = t.account else { return }
-        usage.seconds[name, default: 0] += Double(nanos) / 1e9
+        scanned.seconds[name, default: 0] += Double(nanos) / 1e9
     }
 
     private func cachedPath(_ pid: pid_t) -> String {
@@ -512,6 +744,5 @@ final class Detector: @unchecked Sendable {
         tracks[pid]?.alerted = true
         tracks[pid]?.overSince = nil
         tracks[pid]?.memAlerted = true
-        tracks[pid]?.pressureAlerted = true
     }
 }

@@ -35,7 +35,7 @@ final class AppSettings: @unchecked Sendable {
             K.launchAtLogin: false,
             K.cpu: true,
             K.memory: true,
-            K.memoryShare: 50.0,
+            K.memoryShare: 10.0,
             K.memorySustain: 10.0,
             K.memoryFill: 12.0,
             K.colouredIcon: false,
@@ -68,9 +68,13 @@ final class AppSettings: @unchecked Sendable {
         get { d.bool(forKey: K.cpu) } set { d.set(newValue, forKey: K.cpu) } }
     var memoryEnabled: Bool {
         get { d.bool(forKey: K.memory) } set { d.set(newValue, forKey: K.memory) } }
-    /// Percent of physical RAM a single process must hold before its memory use
-    /// is worth mentioning. A share rather than an absolute figure, because
-    /// 6 GB is fine on a 64 GB Studio and fatal on an 8 GB Air.
+    /// Percent of physical RAM a process must hold before its growth is worth
+    /// calling a leak. A share rather than an absolute figure, because 6 GB is
+    /// fine on a 64 GB Studio and fatal on an 8 GB Air. It used to be half, and
+    /// a leak had already done most of its damage by the time it got there; the
+    /// fit and the fill horizon are what keep honest growth from being called a
+    /// leak, not this. A Mac short of memory is the swap warning's business,
+    /// and that has no threshold for any one process at all.
     var memoryShareThreshold: Double {
         get { d.double(forKey: K.memoryShare) } set { d.set(newValue, forKey: K.memoryShare) } }
     var memoryThresholdBytes: UInt64 { UInt64(Double(HostMemory.physical) * memoryShareThreshold / 100) }

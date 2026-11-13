@@ -12,6 +12,12 @@ struct Usage {
     var busy: Double = 0
     /// Wall-clock seconds these figures cover.
     var span: Double = 0
+
+    mutating func add(_ u: Usage) {
+        busy += u.busy
+        span += u.span
+        for (k, v) in u.seconds { seconds[k, default: 0] += v }
+    }
 }
 
 /// CPU time used in one span of time, by app.

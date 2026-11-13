@@ -26,6 +26,33 @@ struct MenuView: View {
             }
         }
 
+        // The Mac short of memory. The headline carries the details and the
+        // one thing to do about the warning; the apps holding the memory stay
+        // at the top level, because they are what the user came to read.
+        if let swapping = monitor.swapping {
+            Divider()
+            Menu(swapping.headline) {
+                if !monitor.swappingIgnored {
+                    Button("Ignore Until It Stops") { monitor.ignoreSwapping() }
+                    Divider()
+                }
+                ForEach(swapping.details, id: \.self) { Text($0) }
+            }
+            ForEach(swapping.top, id: \.name) { holder in
+                Text(holder.text)
+            }
+        }
+
+        // The machine as a whole. Status lines, not actions: there is no one
+        // process to stop, and CPU History, below, has the rest.
+        if let load = monitor.load {
+            Divider()
+            Text(load.summary)
+            ForEach(load.top, id: \.name) { share in
+                Text(share.text)
+            }
+        }
+
         if Notifier.authorizationProblem != nil {
             Divider()
             Text("Notifications are turned off")
@@ -59,7 +86,11 @@ struct MenuView: View {
         if monitor.isPaused {
             Text("Paused")
         } else if monitor.incidents.isEmpty {
-            Text("Nothing running away")
+            // "Nothing running away" on its own reads as "all is well", and
+            // with half the cores in use or more it is not the whole truth.
+            Text(monitor.swapping != nil ? "Nothing running away, but the Mac is swapping heavily"
+                 : monitor.load != nil ? "Nothing running away, but the CPU is busy"
+                 : "Nothing running away")
         } else {
             Text(monitor.incidents.count == 1
                  ? "1 process running away"

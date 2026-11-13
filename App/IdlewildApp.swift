@@ -16,7 +16,7 @@ struct IdlewildApp: App {
             // The icon changes shape only when state changes - never on a timer.
             // A menu bar item that repaints on a schedule is the exact failure
             // this app exists to catch.
-            if monitor.colouredIcon && !monitor.incidents.isEmpty {
+            if monitor.colouredIcon && monitor.isAlarmed {
                 Image(nsImage: MenuBarIcon.colouredFlame)
             } else {
                 Image(systemName: iconName)
@@ -45,7 +45,7 @@ struct IdlewildApp: App {
     }
 
     private var iconName: String {
-        if !monitor.incidents.isEmpty { return "flame.fill" }
+        if monitor.isAlarmed { return "flame.fill" }
         return monitor.isPaused ? "pause.circle" : MenuBarIcon.calm
     }
 }
@@ -108,6 +108,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                                 withCompletionHandler done: @escaping () -> Void) {
         // The reminder Sparkle's gentle API asks for: clicking it is the user
         // saying "yes, show me", so run the check that opens the update alert.
+        if response.notification.request.identifier == Notifier.swappingNotificationID {
+            Task { @MainActor in
+                defer { done() }
+                if response.actionIdentifier == Notifier.Action.ignore.rawValue {
+                    AppDelegate.monitor?.ignoreSwapping()
+                }
+            }
+            return
+        }
+
         if response.notification.request.identifier == Notifier.updateNotificationID {
             Task { @MainActor in
                 defer { done() }

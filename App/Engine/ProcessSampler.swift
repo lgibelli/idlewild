@@ -112,6 +112,22 @@ enum HostMemory {
         var sz = MemoryLayout<xsw_usage>.size
         return sysctlbyname("vm.swapusage", &sw, &sz, nil, 0) == 0 ? sw.xsu_used : 0
     }
+
+    /// Bytes read back from swap and written to it since boot. How much swap is
+    /// in use says little on its own: pages nobody touches can sit there for a
+    /// week at no cost. What the machine feels is the traffic.
+    static func swapTraffic() -> (in: UInt64, out: UInt64)? {
+        var s = vm_statistics64()
+        var n = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size)
+        let kr = withUnsafeMutablePointer(to: &s) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(n)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &n)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return nil }
+        let page = UInt64(vm_kernel_page_size)
+        return (s.swapins &* page, s.swapouts &* page)
+    }
 }
 
 /// Whole-machine CPU time, for the part of the history no process accounts
