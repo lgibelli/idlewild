@@ -1,3 +1,37 @@
+# Idlewild 1.3.0
+
+Idlewild warns you when your Mac is swapping heavily, and says which apps are
+holding the memory.
+
+Until now it named a culprit only when a single process held half of the
+memory. A Mac rarely runs out that way: a browser, an editor, a build and a
+dozen other things each hold a gigabyte or two, and together they hold more than
+the Mac has. So on a 16 GB Mac moving twenty megabytes a second to and from
+swap, it said nothing.
+
+Once the Mac has been moving 4 MB/s or more to and from swap for ten minutes,
+Idlewild posts a warning and lights the icon, and the menu lists the apps
+holding the most memory, each app's processes added up however small each one
+is. Waking an app that was swapped out overnight does not count. The warning
+goes away when the swapping eases, and Ignore Until It Stops puts the icon out
+in the meantime.
+
+A process also no longer has to hold half of the memory before its growth can
+be called a leak: a tenth is enough. You can change that in Settings → Memory.
+
+## When the CPU is busy
+
+When half the cores or more have been in use for five minutes and no one
+process is running away, the menu now says so instead of only "Nothing running
+away", with how many cores are in use and where the time is going. It does not
+notify you or light the icon: a build is supposed to do this.
+
+## Also
+
+- CPU History files a program's time under its own name, not under the program
+  that started it, such as xpcproxy_sim in the iOS Simulator. This was in 1.2.3,
+  which was never offered as an update.
+
 # Idlewild 1.2.3
 
 CPU History files a program's time under its own name, not under the program
