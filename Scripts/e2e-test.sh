@@ -304,13 +304,75 @@ func wraps(_ dir: String) -> Bool {
     return ok && (saved.fine + saved.coarse).allSatisfy { $0.apps.values.allSatisfy { $0 < w / 2 } }
 }
 
+/// The memory history: a scan files every app's memory and the swap, slices
+/// merge and fold it, a history saved before there was any still loads with
+/// its CPU time, and what is recorded survives a save.
+func memoryHistory(_ dir: String) -> Bool {
+    var ok = true
+    func expect(_ c: Bool, _ what: String) { if !c { print("  wrong: " + what); ok = false } }
+
+    let d = Detector(settings: AppSettings())
+    Thread.sleep(forTimeInterval: 0.1)
+    _ = d.scan()                             // learns where every counter stands
+    _ = d.takeUsage()
+    Thread.sleep(forTimeInterval: 0.5)
+    _ = d.scan()
+    let m = d.takeUsage().memory
+    let held = (m.apps.values.reduce(0, +) + m.other) / max(m.seen, 0.001)
+    print(String(format: "  one scan: %.2f s measured, %.1f GB held, %d apps named, %.1f GB of swap in use",
+                 m.seen, held / 1_073_741_824, m.apps.count, m.swapUsed / max(m.seen, 0.001) / 1_073_741_824))
+    expect(m.seen > 0.3 && m.seen < 2, "the scan's memory does not cover the time between scans")
+    expect(held > 256 * 1_048_576, "a Mac's apps came to less than 256 MB")
+    expect(!m.apps.isEmpty, "no app was named")
+
+    var u = Usage()
+    u.span = 30
+    u.memory = MemoryRecord(seen: 30, apps: ["a": 3e10, "b": 2e10, "c": 1e10], other: 5e9,
+                            swapWritten: 4e8, swapRead: 1e8, swapHeavy: 30, swapUsed: 6e10)
+    var s = Slice(start: 0)
+    s.add(u)
+    s.add(u)
+    expect(s.memory?.seen == 60 && s.memory?.apps["a"] == 6e10 && s.memory?.swapHeavy == 60,
+           "adding scans to a slice does not add up their memory")
+    var old = Slice(start: 0)
+    old.seen = 300
+    old.merge(s)
+    expect(old.memory?.seen == 60, "a slice without memory took nothing from one with it")
+    s.fold(keeping: 1)
+    expect(s.memory?.apps.count == 1 && s.memory?.other == 1e10 + 6e10,
+           "folding a slice does not fold its memory into everything else")
+
+    // As 1.3.1 and earlier wrote it: slices with no memory in them at all.
+    let now = Date().timeIntervalSince1970
+    let five = (now / 300).rounded(.down) * 300 - 300, hour = (now / 3600).rounded(.down) * 3600
+    let plain: [String: Any] = ["start": five, "seen": 300.0, "busy": 600.0, "other": 0.0, "apps": ["OneDrive": 30.0]]
+    var hourly = plain; hourly["start"] = hour
+    let stored: [String: Any] = ["version": 1, "fine": [plain], "coarse": [hourly]]
+    let url = URL(fileURLWithPath: dir).appendingPathComponent("memory-history.plist")
+    try! PropertyListSerialization.data(fromPropertyList: stored, format: .binary, options: 0).write(to: url)
+    let h = CPUHistory(url: url)
+    let before = h.snapshot()
+    expect(before.fine.count == 1 && before.fine[0].apps["OneDrive"] == 30 && before.fine[0].memory == nil,
+           "a history saved before there was memory in it did not load as it was")
+    h.record(u, at: Date())
+    h.save()
+    let after = CPUHistory(url: url).snapshot()
+    let open = after.fine.last?.memory
+    expect(open?.seen == 30 && open?.swapRead == 1e8 && after.fine.first?.apps["OneDrive"] == 30,
+           "the memory recorded did not survive a save, or the CPU time before it did not")
+
+    print("  memory history: " + (ok ? "as expected" : "wrong"))
+    return ok
+}
+
 let a = CommandLine.arguments
 switch a.count > 2 ? a[1] : "" {
 case "exec":  exit(execNaming(a[2]) ? 0 : 1)
 case "wraps": exit(wraps(a[2]) ? 0 : 1)
 case "busy":  exit(machineLoad(a[2]) ? 0 : 1)
 case "swap":  exit(swapDecision() ? 0 : 1)
-default:      print("usage: engine-test exec SPINNER | wraps DIR | busy SPINNER | swap -"); exit(2)
+case "memory": exit(memoryHistory(a[2]) ? 0 : 1)
+default:      print("usage: engine-test exec SPINNER | wraps DIR | busy SPINNER | swap - | memory DIR"); exit(2)
 }
 SWIFT
 swiftc -swift-version 5 -target arm64-apple-macos14.0 -o "$WORK/engine-test" \
@@ -324,6 +386,8 @@ check $? "a stored history loses its wrapped readings and keeps the real time"
 check $? "a machine kept busy by many processes is reported busy, and the spinner named for it"
 "$WORK/engine-test" swap -
 check $? "heavy swapping is told from one burst and from reading back alone, and an episode ends once it has eased or stopped writing"
+"$WORK/engine-test" memory "$WORK"
+check $? "a scan files every app's memory and the swap, and a history from before there was memory still loads"
 
 echo
 echo "--- watch output ---"; sed 's/^/  /' "$LOG" | head -30

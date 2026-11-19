@@ -243,6 +243,31 @@ on a Mac belong to root or system users, and `proc_pid_rusage` will not measure
 them for an unprivileged app. Five-minute slices are kept for a day and hourly
 ones for a month, in a binary property list under Application Support.
 
+## Where the memory went
+
+Memory History is the same chart for memory: each spoke is the memory every app
+held over its slice, on average, under the same names and in the same colours.
+Activity Monitor keeps no history of memory, and the question after a slow
+afternoon is usually what was holding it and when the Mac ran short.
+
+Memory is an amount held, not something spent, so it is filed as byte-seconds:
+each process's footprint times the seconds it held it. Those add up across
+scans and slices as CPU-seconds do, and divided by the seconds watched give the
+average, so memory lives in the same slices, tiers and file as the CPU time.
+The footprints are read on every scan already.
+
+A dashed ring marks the Mac's memory. An app's footprint, like Activity
+Monitor's Memory column, counts what of it is compressed or swapped out, so the
+apps can reach past the ring, and a Mac short of memory does. Under the ring, red
+marks the time the swapping warning was up, and the tooltip gives what was
+written to swap and read back and the swap in use.
+
+There is no System band. The CPU's is the machine's busy time less what the
+apps account for, but memory does not subtract: footprints also count graphics
+and shared memory, and on a Mac where they came to 23.7 GB the machine's own
+figures for the same memory came to 19.9 GB. So what belongs to root or to other
+users, WindowServer among it, is left out and the window says so.
+
 ## Not on the Mac App Store
 
 It cannot be. Under the App Sandbox, `proc_listpids`, `proc_pid_rusage` and
@@ -294,7 +319,7 @@ App/Engine/ProcessSampler.swift   kernel primitives, QoS and IPC
 App/Engine/Detector.swift         detection state machine
 App/Engine/Diagnoser.swift        stack sampling and classification
 App/Engine/Monitor.swift          timer, cadence, coordination
-App/Engine/History.swift          CPU history: slices, tiers, storage
+App/Engine/History.swift          CPU and memory history: slices, tiers, storage
 App/UI/                           menu bar and settings
 App/Support/                      preferences, signals, notifications, updates
 cli/main.swift                    headless CLI (scan / watch / selftest / cost)

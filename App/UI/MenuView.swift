@@ -15,6 +15,7 @@ struct MenuView: View {
     @ObservedObject var monitor: Monitor
     @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
+    @AppStorage(HistoryView.kindKey) private var historyKind: HistoryKind = .cpu
 
     var body: some View {
         status
@@ -63,10 +64,8 @@ struct MenuView: View {
         Button(monitor.isPaused ? "Resume Monitoring" : "Pause Monitoring") {
             monitor.togglePause()
         }
-        Button("CPU History\u{2026}") {
-            openWindow(id: "history")
-            NSApp.activate(ignoringOtherApps: true)
-        }
+        Button("CPU History\u{2026}") { openHistory(.cpu) }
+        Button("Memory History\u{2026}") { openHistory(.memory) }
         Button("Settings…") { showSettings() }
             .keyboardShortcut(",", modifiers: .command)
         Button("About Idlewild") {
@@ -96,6 +95,14 @@ struct MenuView: View {
                  ? "1 process running away"
                  : "\(monitor.incidents.count) processes running away")
         }
+    }
+
+    /// One window shows both histories; the item says which to show, and an
+    /// open window switches to it.
+    private func openHistory(_ kind: HistoryKind) {
+        historyKind = kind
+        openWindow(id: "history")
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     /// An LSUIElement app is not activated by opening a window, so the Settings

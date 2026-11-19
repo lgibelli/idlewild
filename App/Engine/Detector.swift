@@ -391,8 +391,8 @@ private struct Track {
     var memPeak: UInt64 = 0
     var memAlerted = false
 
-    /// The name the history files this process's CPU time under, resolved the
-    /// first time it uses any.
+    /// The name the history files this process's CPU time and memory under,
+    /// resolved the first time either is filed.
     var account: String?
     /// The account was named while the process was under a second old, when it
     /// may still have been a launcher about to exec into something else. It is
@@ -438,6 +438,8 @@ final class Detector: @unchecked Sendable {
     /// The same, for the scan in progress alone.
     private var scanned = Usage()
     private var lastHostTicks: HostCPU.Ticks?
+    /// The swap totals at the last scan, for the history's share of them.
+    private var lastSwapTraffic: (in: UInt64, out: UInt64)?
 
     /// The last sustain window of CPU time, in about ten pieces however often
     /// the scans come, and what it adds up to. See weigh.
@@ -550,7 +552,10 @@ final class Detector: @unchecked Sendable {
             }
             lastHostTicks = host
         }
-        if accounting { scanned.span = dt }
+        if accounting {
+            scanned.span = dt
+            scanned.memory.seen = dt
+        }
 
         for pid in lister.list() {
             guard pid > 0, let s = sampleProc(pid) else { continue }
@@ -558,7 +563,10 @@ final class Detector: @unchecked Sendable {
 
             guard var t = tracks[pid], t.startAbs == s.startAbs else {
                 var fresh = Track(startAbs: s.startAbs, cpu: s.cpuNanos, footprint: s.footprint)
-                if accounting { charge(pid, &fresh, nanos: s.cpuNanos) }
+                if accounting {
+                    charge(pid, &fresh, nanos: s.cpuNanos)
+                    hold(pid, &fresh, bytes: s.footprint, for: dt)
+                }
                 tracks[pid] = fresh
                 continue
             }
@@ -567,7 +575,10 @@ final class Detector: @unchecked Sendable {
             // execs than a moment later, same pid and start time. Wrapping that
             // step back filed 584 years of CPU under xpcproxy_sim; it is nothing.
             let used = s.cpuNanos >= t.lastCPU ? s.cpuNanos - t.lastCPU : 0
-            if accounting { charge(pid, &t, nanos: used) }
+            if accounting {
+                charge(pid, &t, nanos: used)
+                hold(pid, &t, bytes: s.footprint, for: dt)
+            }
             let pct = (Double(used) / 1e9) / dt * 100.0
             t.lastCPU = s.cpuNanos
             t.lastFootprint = s.footprint
@@ -658,9 +669,21 @@ final class Detector: @unchecked Sendable {
             pathCache = pathCache.filter { seen.contains($0.key) }
         }
 
-        usage.add(scanned)
+        // Swap is read on every scan, for the history, whether or not memory
+        // is watched: like the CPU time, the history records it regardless.
+        let traffic = HostMemory.swapTraffic()
+        let swapUsed = HostMemory.swapUsed()
+        if accounting, let tr = traffic, let last = lastSwapTraffic, tr.in >= last.in, tr.out >= last.out {
+            scanned.memory.swapWritten = Double(tr.out - last.out)
+            scanned.memory.swapRead = Double(tr.in - last.in)
+        }
+        lastSwapTraffic = traffic
+        if accounting { scanned.memory.swapUsed = Double(swapUsed) * dt }
+
         weigh(scanned, watching: watchCPU && accounting, at: now)
-        watchSwap(watching: watchMemory && accounting, at: now)
+        watchSwap(watching: watchMemory && accounting, traffic: traffic, used: swapUsed, at: now)
+        if accounting && swapping != nil { scanned.memory.swapHeavy = dt }
+        usage.add(scanned)
 
         return incidents
     }
@@ -669,19 +692,19 @@ final class Detector: @unchecked Sendable {
     /// hundreds of them on a Mac, and naming each costs a path lookup.
     static let holderFloor: UInt64 = 16 << 20
 
-    /// One Mach call and one sysctl a scan, and a look at every process's
-    /// footprint, already read, only while the swapping is heavy.
-    private func watchSwap(watching: Bool, at now: Date) {
+    /// Costs nothing of its own: the totals are read once a scan, for the
+    /// history too. The apps holding the memory are summed, from footprints
+    /// already read, only while the swapping is heavy.
+    private func watchSwap(watching: Bool, traffic: (in: UInt64, out: UInt64)?, used: UInt64, at now: Date) {
         // Asleep, paused, or memory not watched: the totals across the gap
         // cannot be placed in time, and whatever was building is over.
-        guard watching, let traffic = HostMemory.swapTraffic() else {
+        guard watching, let traffic else {
             swapWatch.reset()
             swapping = nil
             return
         }
         let heavy = swapWatch.add(at: now.timeIntervalSinceReferenceDate,
-                                  written: traffic.out, readBack: traffic.in,
-                                  used: HostMemory.swapUsed())
+                                  written: traffic.out, readBack: traffic.in, used: used)
         guard heavy, let since = swapWatch.since, let window = swapWatch.window else {
             swapping = nil
             return
@@ -715,6 +738,9 @@ final class Detector: @unchecked Sendable {
     /// busy time and every process's share of it are what the history is
     /// already handed.
     private func weigh(_ u: Usage, watching: Bool, at now: Date) {
+        // The window is CPU time alone; the memory would only be carried.
+        var u = u
+        u.memory = MemoryRecord()
         let window = settings.sustainSeconds
         // A gap the CPU time cannot be placed in, or CPU watching switched
         // off: whatever was building is over.
@@ -787,7 +813,27 @@ final class Detector: @unchecked Sendable {
     /// file it under are left out, and their time lands in the part of the
     /// history the host counters account for and no process does.
     private func charge(_ pid: pid_t, _ t: inout Track, nanos: UInt64) {
-        guard nanos > 0 else { return }
+        guard nanos > 0, let name = account(pid, &t) else { return }
+        scanned.seconds[name, default: 0] += Double(nanos) / 1e9
+    }
+
+    /// Files a process's footprint over the scan under its app, as charge
+    /// files its CPU time. Below the holder floor it goes into the history's
+    /// "everything else" unnamed: most processes on a Mac hold a few
+    /// megabytes, and naming each would cost a path lookup apiece.
+    private func hold(_ pid: pid_t, _ t: inout Track, bytes: UInt64, for dt: Double) {
+        guard bytes > 0 else { return }
+        let byteSeconds = Double(bytes) * dt
+        if bytes >= Self.holderFloor, let name = account(pid, &t) {
+            scanned.memory.apps[name, default: 0] += byteSeconds
+        } else {
+            scanned.memory.other += byteSeconds
+        }
+    }
+
+    /// The name a process's CPU time and memory are filed under, resolved the
+    /// first time either is filed.
+    private func account(_ pid: pid_t, _ t: inout Track) -> String? {
         if t.account == nil || t.accountProvisional {
             let secondLook = t.accountProvisional
             if secondLook { pathCache[pid] = nil }
@@ -795,8 +841,7 @@ final class Detector: @unchecked Sendable {
             t.accountProvisional = !secondLook
                 && absToNanos(mach_absolute_time() &- t.startAbs) < Self.launcherWindow
         }
-        guard let name = t.account else { return }
-        scanned.seconds[name, default: 0] += Double(nanos) / 1e9
+        return t.account
     }
 
     private func cachedPath(_ pid: pid_t) -> String {

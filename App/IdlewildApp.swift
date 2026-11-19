@@ -36,7 +36,7 @@ struct IdlewildApp: App {
         .windowResizability(.contentSize)
         .defaultPosition(.center)
 
-        Window("CPU History", id: "history") {
+        Window("History", id: "history") {
             HistoryView(load: { await monitor.historySnapshot() },
                         clear: { monitor.clearHistory() })
         }

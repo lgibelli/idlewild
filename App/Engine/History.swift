@@ -3,7 +3,8 @@
 
 import Foundation
 
-/// CPU time used between two scans, as the detector hands it over.
+/// CPU time used between two scans, as the detector hands it over, and the
+/// memory held over the same time.
 struct Usage {
     /// CPU-seconds by app. See accountName.
     var seconds: [String: Double] = [:]
@@ -12,15 +13,68 @@ struct Usage {
     var busy: Double = 0
     /// Wall-clock seconds these figures cover.
     var span: Double = 0
+    var memory = MemoryRecord()
 
     mutating func add(_ u: Usage) {
         busy += u.busy
         span += u.span
         for (k, v) in u.seconds { seconds[k, default: 0] += v }
+        if u.memory.seen > 0 { memory.merge(u.memory) }
     }
 }
 
-/// CPU time used in one span of time, by app.
+/// The memory held over a span of time, by app, and what the Mac moved to and
+/// from swap in it.
+///
+/// Memory is an amount held, not something spent like CPU time, so it is kept
+/// as byte-seconds: each process's footprint times the seconds it held it.
+/// Byte-seconds add up across scans and slices as CPU-seconds do, and divided
+/// by the seconds measured they give the average held. So the history keeps
+/// memory in the same slices, tiers and file as the CPU time.
+///
+/// A footprint is the figure Activity Monitor's Memory column shows, and it
+/// counts what of a process is compressed or swapped out at full size. So the
+/// apps together can hold more than the Mac has. Processes that belong to root
+/// or to other users cannot be measured by an app and are not in it at all.
+struct MemoryRecord: Codable {
+    /// Seconds the memory was measured.
+    var seen: Double = 0
+    /// Byte-seconds by app, under the names CPU time is filed under.
+    var apps: [String: Double] = [:]
+    /// Byte-seconds of the processes too small to be worth naming, and of the
+    /// apps folded out of `apps` to keep the slice small.
+    var other: Double = 0
+    /// Bytes written to swap and read back from it.
+    var swapWritten: Double = 0
+    var swapRead: Double = 0
+    /// Seconds the swapping warning was up. See SwapWatch.
+    var swapHeavy: Double = 0
+    /// Byte-seconds of swap in use, the figure Activity Monitor shows as swap
+    /// used.
+    var swapUsed: Double = 0
+
+    mutating func merge(_ m: MemoryRecord) {
+        seen += m.seen
+        other += m.other
+        swapWritten += m.swapWritten
+        swapRead += m.swapRead
+        swapHeavy += m.swapHeavy
+        swapUsed += m.swapUsed
+        for (k, v) in m.apps { apps[k, default: 0] += v }
+    }
+
+    /// Keeps the `n` biggest apps and folds the rest into `other`.
+    mutating func fold(keeping n: Int) {
+        guard apps.count > n else { return }
+        let ranked = apps.sorted { $0.value > $1.value }
+        for (k, v) in ranked[n...] {
+            other += v
+            apps.removeValue(forKey: k)
+        }
+    }
+}
+
+/// CPU time used in one span of time, by app, and the memory held in it.
 struct Slice: Codable {
     /// Seconds since 1970, aligned to the length of the slice.
     var start: TimeInterval
@@ -32,6 +86,10 @@ struct Slice: Codable {
     /// CPU-seconds of the apps folded out of `apps` to keep the slice small.
     var other: Double = 0
     var apps: [String: Double] = [:]
+    /// Nil in a slice recorded before Idlewild kept memory, which a stored
+    /// history decodes without, and which the chart shows as not recorded
+    /// rather than as nothing held.
+    var memory: MemoryRecord?
 
     init(start: TimeInterval) { self.start = start }
 
@@ -39,6 +97,7 @@ struct Slice: Codable {
         seen += u.span
         busy += u.busy
         for (k, v) in u.seconds { apps[k, default: 0] += v }
+        if u.memory.seen > 0 { memory = (memory ?? MemoryRecord()).merging(u.memory) }
     }
 
     mutating func merge(_ s: Slice) {
@@ -46,6 +105,7 @@ struct Slice: Codable {
         busy += s.busy
         other += s.other
         for (k, v) in s.apps { apps[k, default: 0] += v }
+        if let m = s.memory { memory = (memory ?? MemoryRecord()).merging(m) }
     }
 
     /// 2^64 ns in seconds: 584 years, what an unsigned subtraction wraps to.
@@ -73,6 +133,7 @@ struct Slice: Codable {
     /// tail is dozens of daemons using a few milliseconds each; nobody reads
     /// the history for them, and they would triple its size.
     mutating func fold(keeping n: Int) {
+        memory?.fold(keeping: n)
         guard apps.count > n else { return }
         let ranked = apps.sorted { $0.value > $1.value }
         for (k, v) in ranked[n...] {
@@ -82,20 +143,29 @@ struct Slice: Codable {
     }
 }
 
+extension MemoryRecord {
+    func merging(_ m: MemoryRecord) -> MemoryRecord {
+        var r = self
+        r.merge(m)
+        return r
+    }
+}
+
 /// What the history window is given to draw.
 struct HistoryData {
     var fine: [Slice] = []
     var coarse: [Slice] = []
     var cores: Int = HostCPU.cores
+    var physical: UInt64 = HostMemory.physical
 }
 
-/// Where the CPU time went, for the last month.
+/// Where the CPU time went, and the memory, for the last month.
 ///
 /// Two tiers: five-minute slices for the last day, hourly slices for the last
 /// thirty-one. The open five-minute slice is filled scan by scan and filed into
 /// both tiers when it closes. Stored as a binary property list, which writes
 /// each app's name once however many slices mention it; a full month is well
-/// under 200 KB.
+/// under 400 KB with the memory in it.
 ///
 /// Not internally synchronised: like Detector, it belongs to Monitor's scan
 /// queue, and every call must come from there.
@@ -179,14 +249,14 @@ final class CPUHistory: @unchecked Sendable {
             try data.write(to: url, options: .atomic)
             dirty = false
         } catch {
-            log.error("could not save the CPU history: \(error.localizedDescription, privacy: .public)")
+            log.error("could not save the history: \(error.localizedDescription, privacy: .public)")
         }
     }
 
     private func load() {
         guard let url, let data = try? Data(contentsOf: url) else { return }
         guard let s = try? PropertyListDecoder().decode(Stored.self, from: data), s.version == 1 else {
-            log.error("the CPU history could not be read and starts afresh")
+            log.error("the history could not be read and starts afresh")
             return
         }
         fine = s.fine

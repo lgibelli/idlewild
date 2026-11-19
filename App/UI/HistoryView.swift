@@ -48,6 +48,26 @@ enum HistoryRange: String, CaseIterable, Identifiable {
     }
 }
 
+/// What the window shows: where the CPU time went, or the memory.
+enum HistoryKind: String, CaseIterable, Identifiable {
+    case cpu, memory
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .cpu: "CPU"
+        case .memory: "Memory"
+        }
+    }
+
+    var heading: String {
+        switch self {
+        case .cpu: "Where the CPU went"
+        case .memory: "Where the memory went"
+        }
+    }
+}
+
 /// Everything the chart draws, computed once per load rather than per frame.
 struct HistoryChart {
     enum Tint: Equatable { case slot(Int), other, system }
@@ -57,24 +77,41 @@ struct HistoryChart {
         let id: Int
         let name: String
         let tint: Tint
-        /// CPU-seconds over the whole range.
+        /// Over the whole range: CPU-seconds, or byte-seconds of memory.
         let total: Double
     }
 
+    /// What the Mac moved to and from swap in one bin.
+    struct Swap {
+        var written: Double = 0
+        var read: Double = 0
+        /// Seconds the swapping warning was up.
+        var heavy: Double = 0
+        /// Swap in use, on average over the bin.
+        var used: Double = 0
+    }
+
+    let kind: HistoryKind
     let range: HistoryRange
     /// The first bin, in seconds since 1970.
     let start: TimeInterval
     /// Stacking order, centre outwards: what macOS kept to itself, then the
     /// long tail, then the apps from the largest.
     let series: [Series]
-    /// Average cores in use, by bin and then by series.
+    /// By bin and then by series: average cores in use, or average bytes held.
     let values: [[Double]]
     let watched: [Bool]
-    /// CPU-seconds used, and what the cores could have given in the time
-    /// Idlewild was watching. The second is the budget the first is spent from.
+    /// CPU-seconds used, or byte-seconds of memory held, over the range.
     let used: Double
-    let budget: Double
+    /// Seconds Idlewild was watching, over the range. Times the cores it is the
+    /// budget CPU time is spent from; it divides byte-seconds into the average
+    /// held.
+    let seconds: Double
     let cores: Int
+    /// This Mac's memory, in bytes: the ring the memory chart is read against.
+    let physical: Double
+    /// By bin; empty for the CPU.
+    let swap: [Swap]
     let peak: Double
     let now: TimeInterval
     /// The earliest recorded slice in the range, when the record starts inside it.
@@ -85,6 +122,9 @@ struct HistoryChart {
 
     var binCount: Int { values.count }
     var step: TimeInterval { range.step }
+    var budget: Double { seconds * Double(cores) }
+    /// Seconds the swapping warning was up over the range.
+    var heavy: Double { swap.reduce(0) { $0 + $1.heavy } }
 
     func turn(ofBin i: Int) -> Double {
         (turn0 + Double(i) / Double(binCount)).truncatingRemainder(dividingBy: 1)
@@ -102,8 +142,8 @@ struct HistoryChart {
 
     static let slots = 8
 
-    static func build(_ data: HistoryData, range: HistoryRange, now: Date = Date(),
-                      calendar: Calendar = .current) -> HistoryChart {
+    static func build(_ data: HistoryData, kind: HistoryKind = .cpu, range: HistoryRange,
+                      now: Date = Date(), calendar: Calendar = .current) -> HistoryChart {
         let n = range.bins, step = range.step
         let nowT = now.timeIntervalSince1970
         let start: TimeInterval
@@ -117,22 +157,41 @@ struct HistoryChart {
                 .timeIntervalSince1970
         }
 
+        // What each bin holds, CPU or memory alike: the seconds it was
+        // watched, what was not named, and what each app had.
         var seen = [Double](repeating: 0, count: n)
         var busy = seen, other = seen
+        var swap = [Swap](repeating: Swap(), count: kind == .memory ? n : 0)
         var apps = [[String: Double]](repeating: [:], count: n)
         var totals: [String: Double] = [:]
         var first: TimeInterval?
         for s in range == .day ? data.fine : data.coarse {
             let i = Int(((s.start - start) / step).rounded(.down))
             guard i >= 0, i < n else { continue }
-            seen[i] += s.seen
-            busy[i] += s.busy
-            other[i] += s.other
-            for (k, v) in s.apps {
-                apps[i][k, default: 0] += v
-                totals[k, default: 0] += v
+            switch kind {
+            case .cpu:
+                seen[i] += s.seen
+                busy[i] += s.busy
+                other[i] += s.other
+                for (k, v) in s.apps {
+                    apps[i][k, default: 0] += v
+                    totals[k, default: 0] += v
+                }
+                if s.seen > 0 { first = min(first ?? s.start, s.start) }
+            case .memory:
+                guard let m = s.memory else { continue }
+                seen[i] += m.seen
+                other[i] += m.other
+                swap[i].written += m.swapWritten
+                swap[i].read += m.swapRead
+                swap[i].heavy += m.swapHeavy
+                swap[i].used += m.swapUsed          // byte-seconds until divided below
+                for (k, v) in m.apps {
+                    apps[i][k, default: 0] += v
+                    totals[k, default: 0] += v
+                }
+                if m.seen > 0 { first = min(first ?? s.start, s.start) }
             }
-            if s.seen > 0 { first = min(first ?? s.start, s.start) }
         }
 
         let ranked = { (m: [String: Double]) in
@@ -144,7 +203,9 @@ struct HistoryChart {
 
         // Colour follows the app, not its rank in this range: the month's
         // leaders own their slots in every range, so switching from the week
-        // to the day does not repaint an app that appears in both.
+        // to the day does not repaint an app that appears in both. The leaders
+        // are the CPU's in the memory chart too, so an app keeps its colour
+        // from one to the other.
         var month: [String: Double] = [:]
         for s in data.coarse { for (k, v) in s.apps { month[k, default: 0] += v } }
         let anchors = Array(ranked(month).prefix(slots))
@@ -154,26 +215,39 @@ struct HistoryChart {
         for name in top where slot[name] == nil { slot[name] = free.removeFirst() }
 
         let topSet = Set(top)
-        var values = [[Double]](repeating: [Double](repeating: 0, count: top.count + 2), count: n)
+        // The CPU stacks what macOS kept to itself under everything; the
+        // memory has no such figure, because what cannot be measured cannot
+        // be told from what is counted twice. See MemoryRecord.
+        let base = kind == .cpu ? 2 : 1
+        var values = [[Double]](repeating: [Double](repeating: 0, count: top.count + base), count: n)
         var systemTotal = 0.0, otherTotal = 0.0, used = 0.0, watchedSeconds = 0.0, peak = 0.0
         for i in 0..<n where seen[i] > 0 {
             let named = top.map { apps[i][$0] ?? 0 }
             let rest = other[i] + apps[i].filter { !topSet.contains($0.key) }.values.reduce(0, +)
             let attributed = named.reduce(0, +) + rest
-            let system = max(0, busy[i] - attributed)
-            systemTotal += system
             otherTotal += rest
-            used += attributed + system
             watchedSeconds += seen[i]
-            values[i] = ([system, rest] + named).map { $0 / seen[i] }
+            switch kind {
+            case .cpu:
+                let system = max(0, busy[i] - attributed)
+                systemTotal += system
+                used += attributed + system
+                values[i] = ([system, rest] + named).map { $0 / seen[i] }
+            case .memory:
+                used += attributed
+                values[i] = ([rest] + named).map { $0 / seen[i] }
+                swap[i].used /= seen[i]
+            }
             peak = max(peak, values[i].reduce(0, +))
         }
 
-        let series = [Series(id: 0, name: "System & kernel", tint: .system, total: systemTotal),
-                      Series(id: 1, name: "Everything else", tint: .other, total: otherTotal)]
-            + top.enumerated().map { j, name in
-                Series(id: j + 2, name: name, tint: .slot(slot[name] ?? 0), total: totals[name] ?? 0)
-            }
+        let apart: [Series] = kind == .cpu
+            ? [Series(id: 0, name: "System & kernel", tint: .system, total: systemTotal),
+               Series(id: 1, name: "Everything else", tint: .other, total: otherTotal)]
+            : [Series(id: 0, name: "Everything else", tint: .other, total: otherTotal)]
+        let series = apart + top.enumerated().map { j, name in
+            Series(id: j + base, name: name, tint: .slot(slot[name] ?? 0), total: totals[name] ?? 0)
+        }
 
         let turn0: Double
         if range == .day {
@@ -183,12 +257,17 @@ struct HistoryChart {
             turn0 = 0
         }
 
-        return HistoryChart(range: range, start: start, series: series, values: values,
-                            watched: seen.map { $0 > 0 }, used: used,
-                            budget: watchedSeconds * Double(data.cores), cores: data.cores,
+        return HistoryChart(kind: kind, range: range, start: start, series: series, values: values,
+                            watched: seen.map { $0 > 0 }, used: used, seconds: watchedSeconds,
+                            cores: data.cores, physical: Double(data.physical), swap: swap,
                             peak: peak, now: nowT,
                             recordingSince: first.flatMap { $0 > start + step ? $0 : nil },
                             turn0: turn0)
+    }
+
+    /// One bin's value, in the chart's own terms: cores, or bytes.
+    func text(_ v: Double) -> String {
+        kind == .cpu ? coresText(v) : formatBytes(UInt64(max(v, 0)))
     }
 }
 
@@ -218,6 +297,9 @@ private struct Palette {
     var grid: Color { hex(dark ? 0x2c2c2a : 0xe1e0d9) }
     var baseline: Color { hex(dark ? 0x383835 : 0xc3c2b7) }
     var card: Color { hex(dark ? 0x262625 : 0xffffff) }
+    /// The swapping warning's time, under the memory chart. Apart from the
+    /// apps' colours by where it sits, under the ring and not in a spoke.
+    var alert: Color { hex(dark ? 0xff6b5b : 0xd0342c) }
 
     private func hex(_ v: Int) -> Color {
         Color(red: Double((v >> 16) & 0xff) / 255, green: Double((v >> 8) & 0xff) / 255,
@@ -252,11 +334,16 @@ struct HistoryView: View {
     let clear: () -> Void
 
     @Environment(\.colorScheme) private var scheme
+    /// Kept, so the menu can open the window on either, and the window opens
+    /// again on the one last looked at.
+    @AppStorage(HistoryView.kindKey) private var kind: HistoryKind = .cpu
     @State private var range: HistoryRange = .day
     @State private var chart: HistoryChart?
     @State private var progress: Double = 0
     @State private var focus: Int?
     @State private var confirmClear = false
+
+    static let kindKey = "historyKind"
 
     private var palette: Palette { Palette(dark: scheme == .dark) }
 
@@ -277,7 +364,7 @@ struct HistoryView: View {
         .padding(.vertical, 22)
         .frame(width: 900)
         .background(palette.surface)
-        .task(id: range) {
+        .task(id: [kind.rawValue, range.rawValue]) {
             await refresh(animated: true)
             // Slices close every five minutes; keep the open window current
             // without redrawing it any more often than that matters.
@@ -292,7 +379,7 @@ struct HistoryView: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 3) {
-                Text("Where the CPU went")
+                Text(kind.heading)
                     .font(.system(size: 22, weight: .semibold))
                     .foregroundStyle(palette.ink)
                 Text(subtitle)
@@ -300,12 +387,19 @@ struct HistoryView: View {
                     .foregroundStyle(palette.secondary)
             }
             Spacer()
+            Picker("Show", selection: $kind) {
+                ForEach(HistoryKind.allCases) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 150)
             Picker("Range", selection: $range) {
                 ForEach(HistoryRange.allCases) { Text($0.title).tag($0) }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .frame(width: 270)
+            .padding(.leading, 12)
         }
     }
 
@@ -321,27 +415,36 @@ struct HistoryView: View {
 
     private var footer: some View {
         HStack(alignment: .top, spacing: 16) {
-            Text("**System & kernel** is CPU time macOS will not let an app attribute: processes that belong to root or to other users, the kernel itself, and programs that start and finish between two scans. The history is kept on this Mac only.")
+            Text(footnote)
                 .font(.caption)
                 .foregroundStyle(palette.muted)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 12)
             Button("Clear History\u{2026}") { confirmClear = true }
                 .controlSize(.small)
-                .confirmationDialog("Clear the CPU history?", isPresented: $confirmClear) {
+                .confirmationDialog("Clear the history?", isPresented: $confirmClear) {
                     Button("Clear History", role: .destructive) {
                         clear()
                         Task { await refresh(animated: true) }
                     }
                 } message: {
-                    Text("Everything recorded so far is deleted. Recording carries on from now.")
+                    Text("Everything recorded so far, CPU time and memory alike, is deleted. Recording carries on from now.")
                 }
+        }
+    }
+
+    private var footnote: LocalizedStringKey {
+        switch kind {
+        case .cpu:
+            "**System & kernel** is CPU time macOS will not let an app attribute: processes that belong to root or to other users, the kernel itself, and programs that start and finish between two scans. The history is kept on this Mac only."
+        case .memory:
+            "What an app holds is what Activity Monitor's Memory column shows, which counts what of it has been compressed or swapped out, so together the apps can hold more than the Mac has. Processes that belong to root or to other users, WindowServer among them, cannot be measured by an app and are left out. **Red** under a slice is the time the swapping warning was up. The history is kept on this Mac only."
         }
     }
 
     private func refresh(animated: Bool) async {
         let data = await load()
-        chart = HistoryChart.build(data, range: range)
+        chart = HistoryChart.build(data, kind: kind, range: range)
         guard animated else { return }
         var t = Transaction()
         t.disablesAnimations = true
@@ -455,10 +558,27 @@ private struct RadialChart: View, Animatable {
     }
 
     /// The top of the scale: the busiest slice, rounded up to a figure the
-    /// rings can be labelled with.
+    /// rings can be labelled with. The memory's reaches this Mac's memory at
+    /// least, so its ring is always on the chart.
     private var scaleMax: Double {
-        let steps: [Double] = [0.25, 0.5, 1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128]
-        return steps.first { $0 >= chart.peak } ?? chart.peak
+        switch chart.kind {
+        case .cpu:
+            let steps: [Double] = [0.25, 0.5, 1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128]
+            return steps.first { $0 >= chart.peak } ?? chart.peak
+        case .memory:
+            let steps: [Double] = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024]
+            let need = max(chart.peak, chart.physical) / Self.gb
+            return (steps.first { $0 >= need * 0.999 } ?? need) * Self.gb
+        }
+    }
+
+    private static let gb = 1_073_741_824.0
+
+    private func ringLabel(_ v: Double) -> String {
+        switch chart.kind {
+        case .cpu: v == 1 ? "1 core" : String(format: "%g cores", v)
+        case .memory: String(format: "%g GB", (v / Self.gb * 100).rounded() / 100)
+        }
     }
 
     private func radius(_ v: Double) -> CGFloat {
@@ -472,14 +592,27 @@ private struct RadialChart: View, Animatable {
             let g = geometry
             drawGrid(&ctx, g)
             if let b = hoverBin { drawHover(&ctx, g, bin: b) }
+            if chart.kind == .memory { drawSwap(&ctx, g, wash: true) }
             drawSpokes(&ctx, g)
+            if chart.kind == .memory {
+                drawPhysical(&ctx, g)
+                drawSwap(&ctx, g, wash: false)
+            }
+            drawRingLabels(&ctx, g)
             drawClock(&ctx, g)
             drawNow(&ctx, g)
         }
     }
 
+    /// A ring where this Mac's memory falls is left to drawPhysical, which
+    /// labels it for what it is.
+    private var rings: [Double] {
+        [scaleMax / 4, scaleMax / 2, scaleMax].filter {
+            chart.kind == .cpu || abs($0 - chart.physical) > chart.physical * 0.02
+        }
+    }
+
     private func drawGrid(_ ctx: inout GraphicsContext, _ g: Geometry) {
-        let rings = [scaleMax / 4, scaleMax / 2, scaleMax]
         for v in rings {
             let r = radius(v)
             ctx.stroke(Path(ellipseIn: CGRect(x: g.center.x - r, y: g.center.y - r, width: 2 * r, height: 2 * r)),
@@ -488,19 +621,56 @@ private struct RadialChart: View, Animatable {
         let r0 = g.inner
         ctx.stroke(Path(ellipseIn: CGRect(x: g.center.x - r0, y: g.center.y - r0, width: 2 * r0, height: 2 * r0)),
                    with: .color(palette.baseline), lineWidth: 1)
-        // Ring labels ride the twelve o'clock line, on the surface so a spoke
-        // running under one cannot swallow it.
-        for v in rings {
-            let r = radius(v)
-            let label = v == 1 ? "1 core" : String(format: "%g cores", v)
-            let text = ctx.resolve(Text(label).font(.system(size: 9.5, weight: .medium))
-                .foregroundColor(palette.muted))
-            let size = text.measure(in: CGSize(width: 200, height: 40))
-            let at = CGPoint(x: g.center.x + 5, y: g.center.y - r)
-            let pill = CGRect(x: at.x - 3, y: at.y - size.height / 2 - 1,
-                              width: size.width + 6, height: size.height + 2)
-            ctx.fill(Path(roundedRect: pill, cornerRadius: 3), with: .color(palette.surface.opacity(0.85)))
-            ctx.draw(text, at: at, anchor: .leading)
+    }
+
+    /// Ring labels ride the twelve o'clock line, over the spokes and each on
+    /// a patch of the surface, so a spoke running under one cannot swallow it.
+    private func drawRingLabels(_ ctx: inout GraphicsContext, _ g: Geometry) {
+        for v in rings { label(&ctx, g, ringLabel(v), at: radius(v), color: palette.muted) }
+        if chart.kind == .memory {
+            label(&ctx, g, ringLabel(chart.physical) + ", this Mac", at: radius(chart.physical),
+                  color: palette.secondary, weight: .semibold)
+        }
+    }
+
+    private func label(_ ctx: inout GraphicsContext, _ g: Geometry, _ s: String, at r: CGFloat,
+                       color: Color, weight: Font.Weight = .medium) {
+        let text = ctx.resolve(Text(s).font(.system(size: 9.5, weight: weight)).foregroundColor(color))
+        let size = text.measure(in: CGSize(width: 200, height: 40))
+        let at = CGPoint(x: g.center.x + 5, y: g.center.y - r)
+        let pill = CGRect(x: at.x - 3, y: at.y - size.height / 2 - 1,
+                          width: size.width + 6, height: size.height + 2)
+        ctx.fill(Path(roundedRect: pill, cornerRadius: 3), with: .color(palette.surface.opacity(0.85)))
+        ctx.draw(text, at: at, anchor: .leading)
+    }
+
+    /// This Mac's memory, over the spokes so it can be read across them.
+    /// Spokes that reach past it are apps holding more than the Mac has, the
+    /// rest of it compressed or on disk.
+    private func drawPhysical(_ ctx: inout GraphicsContext, _ g: Geometry) {
+        let r = radius(chart.physical)
+        ctx.stroke(Path(ellipseIn: CGRect(x: g.center.x - r, y: g.center.y - r, width: 2 * r, height: 2 * r)),
+                   with: .color(palette.ink.opacity(0.5)),
+                   style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+    }
+
+    /// The time the swapping warning was up: a band under the ring, the
+    /// stronger the more of the slice it covered, and a wash behind the
+    /// spokes, because half an hour is a sliver of a day's clock face.
+    private func drawSwap(_ ctx: inout GraphicsContext, _ g: Geometry, wash: Bool) {
+        let n = chart.binCount, slot = 1 / Double(n)
+        let shown = min(1, progress * 1.5)
+        for (i, b) in chart.swap.enumerated() where b.heavy > 0 && chart.watched[i] {
+            var p = Path()
+            let a0 = chart.turn(ofBin: i)
+            let share = min(b.heavy / chart.step, 1)
+            if wash {
+                quad(&p, g, g.inner, g.outer + 2, a0, a0 + slot)
+                ctx.fill(p, with: .color(palette.alert.opacity((0.06 + 0.08 * share) * shown)))
+            } else {
+                quad(&p, g, g.inner - 6, g.inner - 1, a0, a0 + slot)
+                ctx.fill(p, with: .color(palette.alert.opacity((0.4 + 0.6 * share) * shown)))
+            }
         }
     }
 
@@ -620,23 +790,47 @@ private struct Hero: View {
 
     var body: some View {
         let s = focus.flatMap { f in chart.series.first { $0.id == f } }
-        let seconds = s?.total ?? chart.used
+        let total = s?.total ?? chart.used
+        let share = percentText(chart.used > 0 ? total / chart.used : 0)
         VStack(spacing: 2) {
-            Text(String(format: seconds / 3600 < 10 ? "%.1f" : "%.0f", seconds / 3600))
-                .font(.system(size: 38, weight: .semibold))
-                .foregroundStyle(palette.ink)
-            Text(s.map { $0.name } ?? "CPU hours used")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(palette.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Text(s == nil
-                 ? "\(percentText(chart.budget > 0 ? chart.used / chart.budget : 0)) of \(chart.cores) cores"
-                 : "CPU hours, \(percentText(chart.used > 0 ? seconds / chart.used : 0)) of all used")
-                .font(.system(size: 10))
-                .foregroundStyle(palette.muted)
+            switch chart.kind {
+            case .cpu:
+                figure(String(format: total / 3600 < 10 ? "%.1f" : "%.0f", total / 3600))
+                caption(s?.name ?? "CPU hours used")
+                note(s == nil
+                     ? "\(percentText(chart.budget > 0 ? chart.used / chart.budget : 0)) of \(chart.cores) cores"
+                     : "CPU hours, \(share) of all used")
+            case .memory:
+                // The average over the time watched: byte-seconds over seconds.
+                let gb = chart.seconds > 0 ? total / chart.seconds / 1_073_741_824 : 0
+                figure(String(format: gb < 10 ? "%.1f" : "%.0f", gb))
+                caption(s?.name ?? "GB held on average")
+                if s != nil {
+                    note("GB on average, \(share) of all held")
+                } else if chart.heavy > 0 {
+                    note("Swapping heavily for \(formatDuration(chart.heavy))", color: palette.alert)
+                } else {
+                    note("No heavy swapping")
+                }
+            }
         }
         .multilineTextAlignment(.center)
+    }
+
+    private func figure(_ s: String) -> some View {
+        Text(s).font(.system(size: 38, weight: .semibold)).foregroundStyle(palette.ink)
+    }
+
+    private func caption(_ s: String) -> some View {
+        Text(s)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(palette.secondary)
+            .lineLimit(1)
+            .truncationMode(.middle)
+    }
+
+    private func note(_ s: String, color: Color? = nil) -> some View {
+        Text(s).font(.system(size: 10)).foregroundStyle(color ?? palette.muted)
     }
 }
 
@@ -652,10 +846,15 @@ private struct Tooltip: View {
                 .foregroundStyle(palette.ink)
             if chart.watched[bin] {
                 let v = chart.values[bin]
-                Text("\(coresText(v.reduce(0, +))) cores in use")
+                Text(chart.kind == .cpu
+                     ? "\(coresText(v.reduce(0, +))) cores in use"
+                     : "\(chart.text(v.reduce(0, +))) held")
                     .font(.system(size: 11))
                     .foregroundStyle(palette.secondary)
-                let rows = chart.series.filter { v[$0.id] >= 0.005 }
+                // Less than this is not worth a row: a two-hundredth of a
+                // core, or 16 MB.
+                let floor = chart.kind == .cpu ? 0.005 : 16 * 1_048_576
+                let rows = chart.series.filter { v[$0.id] >= floor }
                     .sorted { v[$0.id] > v[$1.id] }.prefix(7)
                 VStack(alignment: .leading, spacing: 3) {
                     ForEach(Array(rows)) { s in
@@ -666,12 +865,13 @@ private struct Tooltip: View {
                             Text(s.name).lineLimit(1)
                                 .foregroundStyle(palette.secondary)
                             Spacer(minLength: 12)
-                            Text(coresText(v[s.id])).monospacedDigit()
+                            Text(chart.text(v[s.id])).monospacedDigit()
                                 .foregroundStyle(palette.ink)
                         }
                         .font(.system(size: 11))
                     }
                 }
+                if bin < chart.swap.count { swapLines(chart.swap[bin]) }
             } else {
                 Text(chart.start + Double(bin) * chart.step > chart.now
                      ? "Not yet"
@@ -687,6 +887,30 @@ private struct Tooltip: View {
         .background(palette.card, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(palette.ink.opacity(0.1)))
         .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+    }
+
+    /// What the Mac moved to and from swap in the slice, when it moved any,
+    /// and the swap in use, the figure Activity Monitor shows as swap used.
+    @ViewBuilder private func swapLines(_ b: HistoryChart.Swap) -> some View {
+        let moved = b.written + b.read >= 1_048_576
+        if moved || b.used > 0 || b.heavy > 0 {
+            VStack(alignment: .leading, spacing: 2) {
+                if b.heavy > 0 {
+                    Text("Swapping heavily for \(formatDuration(b.heavy))")
+                        .foregroundStyle(palette.alert)
+                }
+                if moved {
+                    Text("\(formatBytes(UInt64(b.written))) written to swap, \(formatBytes(UInt64(b.read))) read back")
+                        .foregroundStyle(palette.secondary)
+                }
+                if b.used > 0 {
+                    Text("\(formatBytes(UInt64(b.used))) of swap in use")
+                        .foregroundStyle(palette.muted)
+                }
+            }
+            .font(.system(size: 11))
+            .padding(.top, 2)
+        }
     }
 
     private var when: String {
@@ -717,7 +941,9 @@ private struct Legend: View {
                 .foregroundStyle(palette.muted)
                 .padding(.bottom, 4)
             if apps.isEmpty {
-                Text("Nothing recorded in this range yet. Idlewild files CPU time as it scans; the first slices appear within five minutes.")
+                Text(chart.kind == .cpu
+                     ? "Nothing recorded in this range yet. Idlewild files CPU time as it scans; the first slices appear within five minutes."
+                     : "Nothing recorded in this range yet. Idlewild files the memory each app holds as it scans; the first slices appear within five minutes.")
                     .font(.callout)
                     .foregroundStyle(palette.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -743,7 +969,9 @@ private struct Legend: View {
                     .truncationMode(.middle)
                     .foregroundStyle(palette.ink)
                 Spacer(minLength: 6)
-                Text(hoursText(s.total))
+                Text(chart.kind == .cpu
+                     ? hoursText(s.total)
+                     : formatBytes(UInt64(chart.seconds > 0 ? s.total / chart.seconds : 0)))
                     .monospacedDigit()
                     .foregroundStyle(palette.secondary)
                 Text(percentText(share))
