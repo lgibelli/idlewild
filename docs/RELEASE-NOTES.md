@@ -1,3 +1,17 @@
+# Idlewild 1.3.1
+
+The swapping warning comes up only while the Mac keeps running out of memory.
+
+In 1.3.0 one burst was enough. Waking an app that had been swapped out
+overnight, or macOS making room all at once, could bring up the warning for ten
+minutes, and after the Mac had run short the warning stayed up while apps read
+their memory back from disk. Now the Mac has to keep writing to swap for the
+warning to start, and the warning goes away once the writing stops.
+
+The warning also says how much swap macOS has added since it began. That is the
+figure Activity Monitor shows as swap used. Activity Monitor's memory graph can
+be green at the same time: the swapping is what made room.
+
 # Idlewild 1.3.0
 
 Idlewild warns you when your Mac is swapping heavily, and says which apps are
