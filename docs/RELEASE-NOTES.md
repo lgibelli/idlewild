@@ -1,3 +1,22 @@
+# Idlewild 1.4.0
+
+Idlewild now keeps a history of memory, beside the history of CPU time.
+
+Choose Memory History in the menu, or switch the history window to Memory. Each
+slice of the day shows how much memory each app held, in the same colours as
+CPU History, against a ring at how much memory your Mac has. Red marks the time
+the swapping warning was up, and pointing at a slice shows what each app held
+and how much the Mac wrote to swap and read back. Activity Monitor keeps none of
+this: it shows memory now, and a few minutes of pressure.
+
+The memory history starts when this version first runs. Your CPU history is
+kept as it was.
+
+## Also
+
+- The labels on the chart's rings no longer disappear behind the slices that
+  cross them.
+
 # Idlewild 1.3.1
 
 The swapping warning comes up only while the Mac keeps running out of memory.
