@@ -176,18 +176,25 @@ func machineLoad(_ spinner: String) -> Bool {
         && found.share.cores >= of / 4 && gone != nil
 }
 
-/// Swap traffic at a steady rate, scanned every 30 s, half of it read back.
+/// Swap traffic at a steady rate, scanned every 30 s unless told otherwise,
+/// half of it read back unless told otherwise. What is written stays in swap.
 struct SwapSim {
     var w = SwapWatch()
-    var t = 1000.0, moved = 0.0, read = 0.0
-    init() { w.add(at: t, moved: 0, readBack: 0) }   // the first scan, which only learns the totals
-    mutating func run(_ seconds: Double, mbps: Double) -> [Bool] {
+    var t = 1000.0, written = 0.0, read = 0.0, used = 0.0
+    var step = 30.0
+    init(step: Double = 30) {
+        self.step = step
+        w.add(at: t, written: 0, readBack: 0, used: 0)   // the first scan, which only learns the totals
+    }
+    mutating func run(_ seconds: Double, mbps: Double, readShare: Double = 0.5) -> [Bool] {
         var seen: [Bool] = []
-        for _ in 0..<Int(seconds / 30) {
-            t += 30
-            moved += mbps * 30 * 1_048_576
-            read += mbps * 15 * 1_048_576
-            seen.append(w.add(at: t, moved: UInt64(moved), readBack: UInt64(read)))
+        for _ in 0..<Int(seconds / step) {
+            t += step
+            let moved = mbps * step * 1_048_576
+            written += moved * (1 - readShare)
+            used += moved * (1 - readShare)
+            read += moved * readShare
+            seen.append(w.add(at: t, written: UInt64(written), readBack: UInt64(read), used: UInt64(used)))
         }
         return seen
     }
@@ -196,28 +203,76 @@ struct SwapSim {
 func swapDecision() -> Bool {
     var ok = true
     func expect(_ c: Bool, _ what: String) { if !c { print("  wrong: " + what); ok = false } }
+    let mb = 1_048_576.0
 
     var a = SwapSim()
     expect(!a.run(570, mbps: 20).contains(true), "heavy before a whole window was in")
     expect(a.run(30, mbps: 20) == [true], "not heavy after ten minutes at 20 MB/s")
     expect(a.w.since == 1000, "the episode does not start where the window did")
-    expect(abs(a.w.rate / 1_048_576 - 20) < 0.01 && abs(a.w.readBack / 1_048_576 - 10) < 0.01,
+    let win = a.w.window
+    expect(win.map { abs($0.written / mb - 10) < 0.01 && abs($0.readBack / mb - 10) < 0.01
+                     && abs($0.steady / mb - 20) < 0.01 } == true,
            "the rates are not what was moved")
+    expect(a.w.usedThen == 0 && win.map { abs(Double($0.used) / mb - 6000) < 1 } == true,
+           "the swap in use is not what it was when the episode began and what it is now")
     expect(!a.run(300, mbps: 0).contains(false), "cleared while the average was still 10 MB/s")
     expect(a.run(300, mbps: 0).last == false, "still heavy after ten minutes of nothing")
 
-    var b = SwapSim()                            // an app swapped out overnight, woken
-    _ = b.run(30, mbps: 2048.0 / 30)             // 2 GB read back at once
-    expect(!b.run(1200, mbps: 0.2).contains(true), "a single 2 GB restore was called heavy")
+    // An app swapped out overnight, woken while Idlewild has long been
+    // watching: 3 GB read back at once, more than the 2.4 GB that ten
+    // minutes at 4 MB/s comes to.
+    var b = SwapSim()
+    _ = b.run(900, mbps: 0.2)
+    let woken = b.run(30, mbps: 3072.0 / 30, readShare: 1)
+    expect(!(woken + b.run(1200, mbps: 0.2)).contains(true), "a single 3 GB restore was called heavy")
+
+    // Cold memory put out to swap all at once, with nothing read back.
+    var e = SwapSim()
+    _ = e.run(900, mbps: 0.2)
+    let put = e.run(30, mbps: 2600.0 / 30, readShare: 0)
+    expect(!(put + e.run(1200, mbps: 0.2)).contains(true), "a single 2.6 GB put out to swap was called heavy")
+
+    // The same on top of swapping that is real but too little to warn of.
+    var f = SwapSim()
+    _ = f.run(900, mbps: 1.5)
+    let onTop = f.run(30, mbps: 2600.0 / 30, readShare: 0)
+    expect(!(onTop + f.run(1200, mbps: 1.5)).contains(true), "one burst on top of 1.5 MB/s was called heavy")
 
     var c = SwapSim()                            // sitting between the two thresholds
     expect(!c.run(1200, mbps: 3).contains(true), "3 MB/s was called heavy")
     _ = c.run(600, mbps: 8)
     expect(!c.run(1200, mbps: 3).contains(false), "3 MB/s ended an episode that started higher")
 
+    // After an episode the apps read back what was put out, with nothing
+    // written: the shortage is over, however long the reading goes on.
+    var g = SwapSim()
+    _ = g.run(600, mbps: 20)
+    let after = g.run(630, mbps: 2.5, readShare: 1)
+    expect(after.first == true, "the episode ended as soon as the writing stopped, not a window after")
+    expect(after.last == false, "reading back alone kept an episode going past a window")
+    expect(!g.run(1200, mbps: 2.5, readShare: 1).contains(true), "reading back alone started an episode")
+
+    // Scanned every five minutes, the slowest Settings allows: steady
+    // swapping is still caught and a burst is still left out.
+    var h = SwapSim(step: 300)
+    expect(h.run(600, mbps: 8).last == true, "steady swapping missed at five-minute scans")
+    var k = SwapSim(step: 300)
+    _ = k.run(900, mbps: 0.2)
+    let slow = k.run(300, mbps: 2600.0 / 300, readShare: 0)
+    expect(!(slow + k.run(1200, mbps: 0.2)).contains(true), "a burst was called heavy at five-minute scans")
+
+    // Scanned every 10 s, as while a suspect is watched: a burst spread over
+    // a minute of scans is still one burst, and steady swapping is caught.
+    var m = SwapSim(step: 10)
+    _ = m.run(900, mbps: 0.2)
+    let spread = m.run(60, mbps: 2600.0 / 60, readShare: 0)
+    expect(!(spread + m.run(1200, mbps: 0.2)).contains(true), "a burst over six scans was called heavy")
+    var q = SwapSim(step: 10)
+    expect(q.run(600, mbps: 8).last == true, "steady swapping missed at 10 s scans")
+
     var d = SwapSim()
     _ = d.run(600, mbps: 20)
-    d.moved = 0; d.read = 0                      // the totals started again
+    d.written = 0; d.read = 0                    // the totals started again
     expect(d.run(30, mbps: 20) == [false], "a counter that went back was not a fresh start")
 
     print("  swap decision: " + (ok ? "as expected" : "wrong"))
@@ -268,7 +323,7 @@ check $? "a stored history loses its wrapped readings and keeps the real time"
 "$WORK/engine-test" busy "$WORK/idlewild_test_spinner" -sustainMinutes 0.1
 check $? "a machine kept busy by many processes is reported busy, and the spinner named for it"
 "$WORK/engine-test" swap -
-check $? "heavy swapping is told from a one-off restore, and an episode ends only once it has eased"
+check $? "heavy swapping is told from one burst and from reading back alone, and an episode ends once it has eased or stopped writing"
 
 echo
 echo "--- watch output ---"; sed 's/^/  /' "$LOG" | head -30

@@ -120,6 +120,7 @@ final class Monitor: ObservableObject {
         let ongoing = detector.ongoing
         let load = detector.load
         let swapping = detector.swapping
+        let swapWindow = detector.swapWindow
         history.record(detector.takeUsage())
 
         // Diagnosis is expensive, so it happens here on the utility queue,
@@ -140,7 +141,7 @@ final class Monitor: ObservableObject {
             self.refreshOwnCost()
             self.resolve(keeping: ongoing)
             self.show(load)
-            self.show(swapping)
+            self.show(swapping, window: swapWindow)
             for i in enriched {
                 if let rule = i.autoQuit {
                     self.autoQuit(i, rule)
@@ -197,11 +198,16 @@ final class Monitor: ObservableObject {
 
     /// Posted once when it begins and taken back when it ends, as an incident
     /// is; in between the menu's figures are at most a minute old.
-    private func show(_ now: Swapping?) {
+    ///
+    /// The window is the last ten minutes of traffic, heavy or not. The log
+    /// gives it when a warning starts and when it ends, so a warning can be
+    /// checked afterwards against what the Mac was doing.
+    private func show(_ now: Swapping?, window: SwapWindow?) {
         guard !isPaused else { return }
         guard let now else {
-            if swapping != nil {
-                log.notice("no longer swapping heavily")
+            if let was = swapping {
+                let figures = window?.text ?? "no longer measured"
+                log.notice("no longer swapping heavily, after \(formatDuration(was.heldFor), privacy: .public): \(figures, privacy: .public)")
                 endSwapping()
             }
             return
@@ -212,7 +218,7 @@ final class Monitor: ObservableObject {
         swappingShown = Date()
         if began {
             let top = now.top.map(\.text).joined(separator: ", ")
-            log.notice("swapping heavily: \(now.headline, privacy: .public); \(top, privacy: .public)")
+            log.notice("swapping heavily: \(now.headline, privacy: .public); \(now.window.text, privacy: .public); \(formatBytes(now.usedThen), privacy: .public) of swap in use when it began; \(top, privacy: .public)")
             Notifier.post(swapping: now, enabled: settings.notificationsEnabled)
         }
     }

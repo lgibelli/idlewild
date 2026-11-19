@@ -154,12 +154,10 @@ struct Swapping {
         }
     }
 
-    /// Bytes a second moved to or from swap, averaged over the window, and how
-    /// much of it was read back.
-    let rate: Double
-    let readBack: Double
-    /// Swap in use now.
-    let used: UInt64
+    /// The last ten minutes of traffic.
+    let window: SwapWindow
+    /// Swap in use when the episode began, at the start of its first window.
+    let usedThen: UInt64
     /// The start of the first window that came out heavy.
     let since: Date
     /// The apps holding the most memory, largest first.
@@ -167,21 +165,56 @@ struct Swapping {
 
     var heldFor: TimeInterval { Date().timeIntervalSince(since) }
 
-    var rateText: String { Self.rate(rate) }
+    /// "Swapping 21 MB/s for 12 min"
+    var headline: String { "Swapping \(SwapWindow.rate(window.rate)) for \(formatDuration(heldFor))" }
+
+    /// Swap the Mac has added since the episode began. Left out when it is
+    /// too little to say: pages written out and freed again leave swap where
+    /// it was, and a figure of a few megabytes would only puzzle.
+    var added: UInt64? {
+        window.used > usedThen &+ (128 << 20) ? window.used - usedThen : nil
+    }
+
+    /// "5.1 GB of swap added since this began, 7.2 GB in use". The figure in
+    /// use is the one Activity Monitor shows as swap used.
+    var swapText: String {
+        added.map { "\(formatBytes($0)) of swap added since this began, \(formatBytes(window.used)) in use" }
+            ?? "\(formatBytes(window.used)) of swap in use"
+    }
+
+    var details: [String] {
+        ["\(SwapWindow.rate(window.written)) written to swap and \(SwapWindow.rate(window.readBack)) read back, on average",
+         swapText + ", on a Mac with \(formatBytes(HostMemory.physical)) of memory",
+         // Otherwise the apps below add up to more than the Mac has, and look wrong.
+         "What each app holds includes what of it has been compressed or swapped out"]
+    }
+}
+
+/// What one window of swap traffic came to: the figures a warning is decided
+/// on, and the ones the log gives when it starts and when it ends, so that
+/// whether it was right can be settled afterwards from the log alone.
+struct SwapWindow {
+    /// Bytes a second written to swap and read back from it, averaged over
+    /// the window.
+    let written: Double
+    let readBack: Double
+    /// Both together with the window's busiest two minutes left out.
+    let steady: Double
+    /// Swap in use at the end of the window.
+    let used: UInt64
+
+    var rate: Double { written + readBack }
 
     static func rate(_ bytesPerSecond: Double) -> String {
         let mb = bytesPerSecond / 1_048_576
         return String(format: mb < 10 ? "%.1f MB/s" : "%.0f MB/s", mb)
     }
 
-    /// "Swapping 21 MB/s for 12 min"
-    var headline: String { "Swapping \(rateText) for \(formatDuration(heldFor))" }
-
-    var details: [String] {
-        ["\(Self.rate(readBack)) read back from swap and \(Self.rate(max(rate - readBack, 0))) written to it, on average",
-         "\(formatBytes(used)) of swap in use, on a Mac with \(formatBytes(HostMemory.physical)) of memory",
-         // Otherwise the apps below add up to more than the Mac has, and look wrong.
-         "What each app holds includes what of it has been compressed or swapped out"]
+    /// "6.1 MB/s written, 1.2 MB/s read back, 5.8 MB/s without the busiest
+    /// two minutes, 7.2 GB of swap in use"
+    var text: String {
+        "\(Self.rate(written)) written, \(Self.rate(readBack)) read back, "
+            + "\(Self.rate(steady)) without the busiest two minutes, \(formatBytes(used)) of swap in use"
     }
 }
 
@@ -189,9 +222,8 @@ struct Swapping {
 /// what it has moved to and from swap. Kept apart from the detector, which
 /// reads the totals, so the decision can be tested on totals made up for it.
 struct SwapWatch {
-    /// Heavy is an average over ten minutes, so the cost of waking an app
-    /// that was swapped out overnight, a gigabyte or two read back once, is
-    /// not mistaken for a machine that keeps running out of memory.
+    /// Heavy is an average over ten minutes, so a moment's swapping is not
+    /// mistaken for a machine that keeps running out of memory.
     static let window: TimeInterval = 600
     /// 4 MB/s is 2.4 GB moved in the window. A Mac with room to spare moves
     /// almost nothing; one that has run out moves tens of megabytes a second
@@ -199,43 +231,82 @@ struct SwapWatch {
     /// under half that, so a machine sitting on the line is one episode.
     static let heavyAt: Double = 4 * 1_048_576
     static let easedAt: Double = 2 * 1_048_576
+    /// Writing is what says memory is short: the system puts pages out to
+    /// swap only to make room. Reading back with nothing written is an
+    /// earlier shortage being paid off, an app woken after a night or the
+    /// apps of an episode that is over touching their pages again, and
+    /// however much of it there is, the room is there. So a window has to
+    /// write 1 MB/s to start an episode, and one ends once its writing has
+    /// all but stopped.
+    static let writingAt: Double = 1 * 1_048_576
+    static let stoppedWritingAt: Double = 0.25 * 1_048_576
+    /// What is over within two minutes is a burst. The system puts gigabytes
+    /// out to swap in a few seconds when an app asks for room all at once, and
+    /// reads as much back when an app swapped out overnight is woken.
+    static let burst: TimeInterval = 120
 
-    private struct Point { let t: TimeInterval; let moved: UInt64; let readBack: UInt64 }
+    private struct Point { let t: TimeInterval; let written: UInt64; let read: UInt64; let used: UInt64 }
     private var points: [Point] = []
     private(set) var since: TimeInterval?
-    private(set) var rate: Double = 0
-    private(set) var readBack: Double = 0
+    /// Swap in use at the start of the episode's first window.
+    private(set) var usedThen: UInt64 = 0
+    /// The last whole window's figures, heavy or not; nil until there is one.
+    private(set) var window: SwapWindow?
 
     mutating func reset() {
         points.removeAll()
         since = nil
-        rate = 0
-        readBack = 0
+        usedThen = 0
+        window = nil
     }
 
-    /// Takes the running totals at time t, in bytes. Returns whether the
-    /// swapping is heavy now.
+    /// Takes the running totals at time t, in bytes, and the swap in use.
+    /// Returns whether the swapping is heavy now.
     @discardableResult
-    mutating func add(at t: TimeInterval, moved: UInt64, readBack read: UInt64) -> Bool {
+    mutating func add(at t: TimeInterval, written: UInt64, readBack read: UInt64, used: UInt64 = 0) -> Bool {
         // Totals only grow. One that went down is a counter that started
         // again, and nothing before it can be compared with what follows.
-        if let last = points.last, t <= last.t || moved < last.moved || read < last.readBack {
+        if let last = points.last, t <= last.t || written < last.written || read < last.read {
             reset()
         }
-        points.append(Point(t: t, moved: moved, readBack: read))
+        points.append(Point(t: t, written: written, read: read, used: used))
         // Keep one point at or before the start of the window, so the average
         // always covers all of it.
         while points.count > 2, points[1].t <= t - Self.window { points.removeFirst() }
         guard let first = points.first, t - first.t >= Self.window else {
             since = nil
+            window = nil
             return false
         }
         let span = t - first.t
-        rate = Double(moved - first.moved) / span
-        readBack = Double(read - first.readBack) / span
-        if rate >= Self.heavyAt {
-            if since == nil { since = first.t }
-        } else if rate < Self.easedAt {
+        let w = Double(written - first.written), r = Double(read - first.read)
+        // One burst, however large, is not an episode: a few gigabytes put
+        // out or read back at once average over the window to as much as a
+        // Mac that keeps running out. With the busiest two minutes left out a
+        // burst is gone and steady swapping is still there. Two minutes and
+        // not one scan, because while a suspect is watched the scans come
+        // every few seconds and a burst spans several; at five-minute scans
+        // the stretch is the one scan. The totals only grow, so the most a
+        // stretch from a scan can hold is the longest that fits.
+        var most = 0.0, mostSpan = 0.0
+        for i in points.indices.dropLast() {
+            var k = i + 1
+            while k + 1 < points.count, points[k + 1].t - points[i].t <= Self.burst { k += 1 }
+            let a = points[i], b = points[k]
+            let moved = Double((b.written - a.written) + (b.read - a.read))
+            if moved > most { most = moved; mostSpan = b.t - a.t }
+        }
+        let steady = span > mostSpan ? (w + r - most) / (span - mostSpan) : 0
+        let now = SwapWindow(written: w / span, readBack: r / span, steady: steady, used: used)
+        window = now
+        if since == nil {
+            // And with it left out the rest must still be enough to keep an
+            // episode going.
+            if now.rate >= Self.heavyAt && now.written >= Self.writingAt && now.steady >= Self.easedAt {
+                since = first.t
+                usedThen = first.used
+            }
+        } else if now.rate < Self.easedAt || now.written < Self.stoppedWritingAt {
             since = nil
         }
         return since != nil
@@ -356,6 +427,9 @@ final class Detector: @unchecked Sendable {
     private var swapWatch = SwapWatch()
     /// Set while the Mac is swapping heavily. See Swapping.
     private(set) var swapping: Swapping?
+    /// The last whole window of swap traffic, heavy or not, for the log line
+    /// that says why a warning ended.
+    var swapWindow: SwapWindow? { swapWatch.window }
 
     /// CPU time used since the last takeUsage(), by app, for the history. The
     /// deltas are computed for detection anyway; filing them costs a dictionary
@@ -595,8 +669,8 @@ final class Detector: @unchecked Sendable {
     /// hundreds of them on a Mac, and naming each costs a path lookup.
     static let holderFloor: UInt64 = 16 << 20
 
-    /// One Mach call a scan, and a look at every process's footprint, already
-    /// read, only while the swapping is heavy.
+    /// One Mach call and one sysctl a scan, and a look at every process's
+    /// footprint, already read, only while the swapping is heavy.
     private func watchSwap(watching: Bool, at now: Date) {
         // Asleep, paused, or memory not watched: the totals across the gap
         // cannot be placed in time, and whatever was building is over.
@@ -606,13 +680,13 @@ final class Detector: @unchecked Sendable {
             return
         }
         let heavy = swapWatch.add(at: now.timeIntervalSinceReferenceDate,
-                                  moved: traffic.in &+ traffic.out, readBack: traffic.in)
-        guard heavy, let since = swapWatch.since else {
+                                  written: traffic.out, readBack: traffic.in,
+                                  used: HostMemory.swapUsed())
+        guard heavy, let since = swapWatch.since, let window = swapWatch.window else {
             swapping = nil
             return
         }
-        swapping = Swapping(rate: swapWatch.rate, readBack: swapWatch.readBack,
-                            used: HostMemory.swapUsed(),
+        swapping = Swapping(window: window, usedThen: swapWatch.usedThen,
                             since: Date(timeIntervalSinceReferenceDate: since),
                             top: memoryHolders())
     }

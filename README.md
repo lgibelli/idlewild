@@ -135,18 +135,40 @@ twenty megabytes a second, with no one process above 8 GB, they said nothing.
 What the machine feels when memory runs out is swap traffic: every page read
 back from swap is a stall in whatever needed it, and every page written out is
 the working set not fitting. So that is what Idlewild measures, from the
-system's own running totals, one Mach call a scan. How much swap is in use says
-little on its own; pages nobody touches can sit there for a week at no cost.
+system's own running totals, one Mach call a scan, and one sysctl for the swap
+in use. How much swap is in use says little on its own; pages nobody touches
+can sit there for a week at no cost.
 
 When the traffic has averaged 4 MB/s or more over ten minutes, which is 2.4 GB
 moved, Idlewild posts a warning, lights the icon, and lists the apps holding the
 most memory: every process of an app added up under the name CPU History uses,
 whatever its size. A Mac with room to spare moves almost nothing; the one this
-was measured on, out of room, moved 21 MB/s for half an hour. Waking an app that
-was swapped out overnight reads a gigabyte or two back once, and ten minutes of
-averaging leaves that out. The warning lasts until the average falls under
-2 MB/s, so a machine sitting on the line is one warning, not twenty, and Ignore
-Until It Stops puts the icon out without pretending the swapping has stopped.
+was measured on, out of room, moved 21 MB/s for half an hour.
+
+An average alone calls too much heavy, so two more things have to hold:
+
+- **Something is being written.** The system puts pages out to swap only to make
+  room, so at least 1 MB/s of the traffic has to be writing. Reading back with
+  nothing written is a shortage already over being paid off: an app swapped out
+  overnight woken, or the apps of a finished episode touching their pages
+  again. However many gigabytes that reads, the room is there.
+- **It is not one burst.** Asked for room all at once, the system puts gigabytes
+  out to swap in seconds, and that averages over ten minutes to as much as a Mac
+  that keeps running out. So with the window's busiest two minutes left out, the
+  rest must still be moving 2 MB/s. That holds at any scan interval, from every
+  few seconds while a suspect is watched to every five minutes.
+
+The warning lasts until the average falls under 2 MB/s or the writing all but
+stops, under 0.25 MB/s, so a machine sitting on the line is one warning, not
+twenty. Ignore Until It Stops puts the icon out without pretending the swapping
+has stopped.
+
+Activity Monitor can show a green memory graph while the warning is up. That is
+no contradiction: the graph is memory pressure, and pressure falls because the
+swapping has made room. The figure the two share is swap used, so the warning
+says how much swap macOS has added since the episode began, and the log gives
+each warning's traffic, written and read apart, when it starts and when it
+ends.
 
 The memory pressure dispatch source still lets the kernel wake Idlewild when
 pressure rises, so the figures are fresh when it matters; there is no polling.

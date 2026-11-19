@@ -154,13 +154,17 @@ enum Notifier {
         guard enabled else { return }
         let n = UNMutableNotificationContent()
         n.title = "Your Mac is swapping heavily"
-        n.subtitle = swapping.headline + ", " + formatBytes(swapping.used) + " of swap in use"
+        n.subtitle = swapping.headline + ", " + formatBytes(swapping.window.used) + " of swap in use"
         let held = swapping.top.prefix(3).map {
             "\($0.name) (\(formatBytes($0.bytes))\($0.processes > 1 ? " in \($0.processes) processes" : ""))"
         }
-        n.body = held.isEmpty
+        // How much swap grew is the figure that matches Activity Monitor,
+        // whose memory graph can be green by then: the swapping is what
+        // relieved the pressure.
+        let grown = swapping.added.map { "macOS has added \(formatBytes($0)) of swap in that time. " } ?? ""
+        n.body = grown + (held.isEmpty
             ? "Memory has run short and the Mac is using its disk instead."
-            : "Memory has run short. Holding the most: " + listed(held) + "."
+            : "Memory has run short. Holding the most: " + listed(held) + ".")
         n.categoryIdentifier = swappingCategoryID
         n.sound = .default
         UNUserNotificationCenter.current().add(
